@@ -1,0 +1,417 @@
+{
+    "entities": {
+        "AppUser": {
+            "title": "App User",
+            "description": "Represents a user in the application, either a collaborator or a manager.",
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The unique ID of the user (UUID)."
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "email": {
+                    "type": "string"
+                },
+                "keycloak_user_id": {
+                    "type": "string"
+                },
+                "active": {
+                    "type": "boolean"
+                },
+                "role": {
+                    "type": "string",
+                    "enum": [
+                        "colaborador",
+                        "gestor"
+                    ]
+                },
+                "name": {
+                    "type": "string"
+                },
+                "avatar": {
+                    "type": "string"
+                },
+                "location_id": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "email",
+                "keycloak_user_id",
+                "active"
+            ]
+        },
+        "WorkLocation": {
+            "title": "Work Location",
+            "description": "Represents a construction site or office location.",
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "latitude": {
+                    "type": "number"
+                },
+                "longitude": {
+                    "type": "number"
+                },
+                "radius_meters": {
+                    "type": "number"
+                },
+                "active": {
+                    "type": "boolean"
+                },
+                "progress": {
+                    "type": "number"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "image": {
+                    "type": "string"
+                },
+                "themeColor": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "name",
+                "latitude",
+                "longitude",
+                "radius_meters",
+                "active"
+            ]
+        },
+        "TimeLog": {
+            "title": "Time Log",
+            "description": "Represents a check-in or check-out event by a user.",
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "app_user_id": {
+                    "type": "string"
+                },
+                "work_location_id": {
+                    "type": "string"
+                },
+                "device_id": {
+                    "type": "string"
+                },
+                "timestamp": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "check_in",
+                        "check_out"
+                    ]
+                },
+                "latitude": {
+                    "type": "number"
+                },
+                "longitude": {
+                    "type": "number"
+                },
+                "valid": {
+                    "type": "boolean"
+                },
+                "location_name": {
+                    "type": "string"
+                },
+                "employee_name": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "app_user_id",
+                "timestamp",
+                "type",
+                "latitude",
+                "longitude",
+                "valid"
+            ]
+        },
+        "DailyAttendance": {
+            "title": "Daily Attendance",
+            "description": "Summarizes attendance for a specific day and user.",
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "app_user_id": {
+                    "type": "string"
+                },
+                "work_location_id": {
+                    "type": "string"
+                },
+                "attendance_date": {
+                    "type": "string"
+                },
+                "first_check_in": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "last_check_out": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "status": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "app_user_id",
+                "work_location_id",
+                "attendance_date",
+                "status"
+            ]
+        },
+        "LeaveRequest": {
+            "title": "Leave Request",
+            "description": "A request for time off by a user.",
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "approver_id": {
+                    "type": "string"
+                },
+                "end_date": {
+                    "type": "string"
+                },
+                "keycloak_user_id": {
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "start_date": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "created_at",
+                "updated_at",
+                "approver_id",
+                "end_date",
+                "keycloak_user_id",
+                "reason",
+                "start_date",
+                "status",
+                "type"
+            ]
+        },
+        "NotificationItem": {
+            "title": "Notification Item",
+            "description": "A notification for a user.",
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "info",
+                        "warning",
+                        "success"
+                    ]
+                },
+                "timestamp": {
+                    "type": "number"
+                },
+                "isRead": {
+                    "type": "boolean"
+                },
+                "app_user_id": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "id",
+                "title",
+                "message",
+                "type",
+                "timestamp",
+                "isRead"
+            ]
+        },
+        "UserLocationHistory": {
+            "title": "User Location History",
+            "description": "Historical GPS coordinates of a user.",
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "keycloak_user_id": {
+                    "type": "string"
+                },
+                "latitude": {
+                    "type": "number"
+                },
+                "longitude": {
+                    "type": "number"
+                },
+                "accuracy": {
+                    "type": "number"
+                },
+                "source": {
+                    "type": "string"
+                },
+                "timestamp": {
+                    "type": "string",
+                    "format": "date-time"
+                }
+            },
+            "required": [
+                "id",
+                "keycloak_user_id",
+                "latitude",
+                "longitude",
+                "accuracy",
+                "source",
+                "timestamp"
+            ]
+        },
+        "Device": {
+            "title": "Device",
+            "description": "A device registered to a user.",
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "device_id": {
+                    "type": "string"
+                },
+                "device_type": {
+                    "type": "string"
+                },
+                "keycloak_user_id": {
+                    "type": "string"
+                },
+                "last_seen_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "os": {
+                    "type": "string"
+                },
+                "trusted": {
+                    "type": "boolean"
+                }
+            },
+            "required": [
+                "id",
+                "created_at",
+                "device_id",
+                "device_type",
+                "keycloak_user_id",
+                "last_seen_at",
+                "os",
+                "trusted"
+            ]
+        }
+    },
+    "firestore": {
+        "users": {
+            "schema": "AppUser",
+            "description": "Collection of application users."
+        },
+        "work_locations": {
+            "schema": "WorkLocation",
+            "description": "Collection of construction sites and offices."
+        },
+        "time_logs": {
+            "schema": "TimeLog",
+            "description": "Collection of user check-in and check-out events."
+        },
+        "attendances": {
+            "schema": "DailyAttendance",
+            "description": "Collection of daily attendance summaries."
+        },
+        "leave_requests": {
+            "schema": "LeaveRequest",
+            "description": "Collection of leave requests."
+        },
+        "notifications": {
+            "schema": "NotificationItem",
+            "description": "Collection of user notifications."
+        },
+        "location_history": {
+            "schema": "UserLocationHistory",
+            "description": "Collection of user GPS history."
+        },
+        "devices": {
+            "schema": "Device",
+            "description": "Collection of registered devices."
+        }
+    }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Remix: OS Operacional",
+  "description": "App de gestão diária para funcionários da Objetivo Similar - Construção Civil e Engenharia.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ],
+  "majorCapabilities": []
+}

@@ -1,0 +1,60 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:ital,wght@0,400;0,700;1,400&family=Outfit:wght@400;600;800&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: "Outfit", sans-serif;
+}
+
+@layer base {
+  :root {
+    --brand-blue: #00A3FF;
+    --brand-gold: #F0CC4A;
+    --brand-red: #FE4A49;
+    --brand-navy: #0F172A;
+    --brand-bg: #F8FAFC;
+    --dark-bg: #050505;
+    --dark-surface: #111111;
+    --dark-border: #1a1a1a;
+  }
+}
+
+@layer components {
+  .tech-badge {
+    @apply bg-brand-navy text-white text-[9px] font-black px-2 py-1 rounded flex items-center gap-2 border border-white/10 tracking-widest;
+  }
+
+  .glass-card {
+    @apply bg-white/80 backdrop-blur-md border border-white/20 shadow-xl rounded-2xl;
+  }
+
+  .dark .glass-card {
+    @apply bg-black/40 backdrop-blur-md border border-white/5 shadow-2xl rounded-2xl;
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased transition-colors duration-300;
+    font-family: var(--font-sans);
+  }
+
+  .dark body {
+    @apply bg-[#040608] text-slate-100;
+  }
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.display {
+  font-family: var(--font-display);
+}
+
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 24px);
+}
