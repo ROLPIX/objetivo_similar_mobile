@@ -1,20 +1,47 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Objetivo Similar Mobile - OS Operacional 📱
 
-# Run and deploy your AI Studio app
+Este é o aplicativo móvel do sistema **OS Operacional**, desenvolvido com **React Native** e **Expo**. O projeto foi estruturado para oferecer uma experiência fluida tanto em dispositivos móveis (Android/iOS) quanto na Web.
 
-This contains everything you need to run your app locally.
+## 🚀 Tecnologias Utilizadas
 
-View your app in AI Studio: https://ai.studio/apps/88fd973e-a7f1-4715-9f48-306bb0594de1
+*   [React Native](https://reactnative.dev/) - Framework para apps nativos.
+*   [Expo](https://expo.dev/) - Plataforma de desenvolvimento e build.
+*   [Firebase](https://firebase.google.com/) - Autenticação e Banco de Dados (Firestore).
+*   [Tailwind CSS (NativeWind)](https://www.nativewind.dev/) - Estilização.
+*   [TypeScript](https://www.typescriptlang.org/) - Tipagem estática para maior segurança.
+*   [Vite](https://vitejs.dev/) - Suporte otimizado para versão Web.
 
-## Run Locally
+## 🛠️ Pré-requisitos
 
-**Prerequisites:**  Node.js
+Antes de começar, você precisará ter instalado em sua máquina:
+*   [Node.js](https://nodejs.org/) (Versão LTS recomendada)
+*   [Git](https://git-scm.com/)
+*   Aplicativo **Expo Go** instalado no seu celular (Android ou iOS).
 
+## 📥 Instalação
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+1.  Clone este repositório:
+    ```bash
+    git clone https://github.com/rpjicond/objetivo_similar_mobile.git
+    ```
+
+2.  Acesse a pasta do projeto:
+    ```bash
+    cd objetivo_similar_mobile
+    ```
+
+3.  Instale as dependências:
+    ```bash
+    npm install
+    ```
+
+4.  Configure as variáveis de ambiente:
+    *   Crie um arquivo `.env` na raiz do projeto.
+    *   Copie o conteúdo de `.env.example` e preencha com suas chaves do Firebase.
+
+## 🏃 Como Rodar o Projeto
+
+Inicie o servidor de desenvolvimento do Expo:
+
+```bash
+npx expo start
