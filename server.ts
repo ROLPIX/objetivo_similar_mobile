@@ -90,15 +90,27 @@ apiRouter.post("/update-password", async (req, res) => {
                     to: email,
                     subject: "Palavra-passe Alterada - Objetivo Similar",
                     html: `
-            <div style="font-family: sans-serif; padding: 20px; color: #1e293b;">
-              <h1 style="color: #14233c;">Olá ${name || 'Utilizador'}!</h1>
-              <p>A tua palavra-passe foi alterada com sucesso no sistema da <strong>Objetivo Similar</strong>.</p>
-              <div style="background: #fffbeb; padding: 15px; border-radius: 8px; border-left: 4px solid #f59e0b; margin: 20px 0;">
-                <p style="margin: 0; color: #92400e;"><strong>Segurança:</strong> Se não foste tu que realizaste esta alteração, contacta imediatamente o administrador do sistema.</p>
+            <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1e293b; background-color: #fafafa; border-radius: 10px; overflow: hidden; border: 1px solid #e2e8f0;">
+              
+              <div style="background-color: #ffffff; padding: 30px; text-align: center; border-bottom: 2px solid #00aeef;">
+                 <img src="https://firebasestorage.googleapis.com/v0/b/objetivo-similar-mobile.appspot.com/o/public%2Flogo_empresa.png?alt=media" alt="Objetivo Similar" style="max-height: 70px; margin-bottom: 0px;" />
               </div>
-              <p>Já podes entrar na aplicação com a tua nova palavra-passe.</p>
-              <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
-              <p style="font-size: 12px; color: #94a3b8;">Objetivo Similar Lda - Engenharia e Construção</p>
+
+              <div style="padding: 40px 30px; background-color: #ffffff;">
+                <h1 style="color: #14233c; margin-top: 0; font-size: 22px; font-weight: 800;">Olá ${name || 'Utilizador'}!</h1>
+                <p style="color: #475569; font-size: 16px; line-height: 1.5;">A tua palavra-passe foi alterada com sucesso no sistema da <strong>Objetivo Similar</strong>.</p>
+                
+                <div style="background: #fffbeb; padding: 15px; border-radius: 8px; border-left: 4px solid #f59e0b; margin: 20px 0;">
+                  <p style="margin: 0; color: #92400e; font-size: 15px;"><strong>Segurança:</strong> Se não foste tu que realizaste esta alteração, contacta imediatamente o administrador do sistema.</p>
+                </div>
+                
+                <p style="color: #475569; font-size: 16px; line-height: 1.5;">Já podes entrar na aplicação com a tua nova palavra-passe.</p>
+              </div>
+
+              <div style="text-align: center; padding: 25px; background-color: #f8fafc; color: #64748b; font-size: 12px; border-top: 1px solid #e2e8f0;">
+                Objetivo Similar Construções Unipessoal Lda - Engenharia e Construção<br>
+                Esta é uma mensagem automática.
+              </div>
             </div>
           `
                 });
@@ -145,7 +157,61 @@ apiRouter.post("/register-employee", async (req, res) => {
                     from: process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev",
                     to: email,
                     subject: "Bem-vindo - Objetivo Similar",
-                    html: `<div style="padding: 20px;"><h1>Olá ${name}!</h1><p>Email: ${email}</p><p>Password: ${password}</p></div>`
+                    html: `
+            <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1e293b; background-color: #fafafa; border-radius: 10px; overflow: hidden; border: 1px solid #e2e8f0;">
+              
+              <!-- Cabeçalho / Logo -->
+              <div style="background-color: #ffffff; padding: 40px 30px; text-align: center; border-bottom: 2px solid #00aeef;">
+                <img src="https://firebasestorage.googleapis.com/v0/b/objetivo-similar-mobile.appspot.com/o/public%2Flogo_empresa.png?alt=media" alt="Objetivo Similar" style="max-height: 80px; margin-bottom: 0px;" />
+              </div>
+
+              <!-- Corpo do Email -->
+              <div style="padding: 40px 30px; background-color: #ffffff;">
+                <h1 style="color: #14233c; margin-top: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px;">Olá ${name}!</h1>
+                
+                <p style="font-size: 16px; line-height: 1.6; color: #475569; margin-bottom: 30px;">
+                  Bem-vindo(a) à aplicação da <strong>Objetivo Similar, Unipessoal Lda</strong>. O teu perfil de colaborador foi criado com sucesso e a tua conta já se encontra ativa.
+                </p>
+
+                <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 25px; margin-bottom: 30px;">
+                  <h2 style="font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #64748b; margin-top: 0; margin-bottom: 20px;">As tuas credenciais de acesso</h2>
+                  
+                  <div style="margin-bottom: 15px;">
+                    <span style="font-size: 13px; color: #64748b; display: block; margin-bottom: 4px;">Email / Utilizador</span>
+                    <strong style="color: #0f172a; font-size: 16px;">${email}</strong>
+                  </div>
+                  
+                  <div>
+                    <span style="font-size: 13px; color: #64748b; display: block; margin-bottom: 4px;">Palavra-passe temporária</span>
+                    <div style="background-color: #e0f2fe; color: #0284c7; padding: 10px 15px; border-radius: 6px; display: inline-block; font-family: monospace; font-size: 18px; font-weight: bold; letter-spacing: 2px;">
+                      ${password}
+                    </div>
+                  </div>
+                </div>
+
+                <p style="font-size: 15px; line-height: 1.6; color: #475569;">
+                  Recomendamos vivamente que alteres esta palavra-passe no teu primeiro acesso através na área de <strong>Conta &gt; Segurança</strong> da aplicação.
+                </p>
+
+                <p style="font-size: 15px; line-height: 1.6; color: #475569; margin-top: 30px; margin-bottom: 0;">
+                  Com os melhores cumprimentos,<br />
+                  <strong>A Direção - Objetivo Similar</strong>
+                </p>
+              </div>
+
+              <!-- Rodapé -->
+              <div style="text-align: center; padding: 30px; background-color: #f1f5f9; color: #64748b; font-size: 13px; border-top: 1px solid #e2e8f0;">
+                <p style="margin: 0 0 10px 0;">
+                  Objetivo Similar Construções Unipessoal Lda<br />
+                  Construção Civil e Engenharia
+                </p>
+                <p style="margin: 0; font-size: 11px;">
+                  Esta é uma mensagem automática. Por favor, não respondas a este email.
+                </p>
+              </div>
+
+            </div>
+          `
                 });
                 console.log(`Email successfully sent to ${email}`);
             } catch (e) {
