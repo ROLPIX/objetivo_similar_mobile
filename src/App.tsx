@@ -2261,65 +2261,12 @@ export default function App() {
     seedUsers();
   }, []);
 
-  const [customApiUrl, setCustomApiUrl] = usePersistentState<string | null>('os_custom_api_url', null);
-  const [showServerConfig, setShowServerConfig] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
 
   const getApiUrl = (path: string) => {
     if (path.startsWith('http')) return path;
-
-    // Ensure path starts with /
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-
-    // User override
-    if (customApiUrl) {
-      let base = customApiUrl.trim();
-
-      // If it doesn't have a protocol, add http://
-      if (!base.includes('://')) {
-        // If it was something like "http:192.168.1.1" (typo)
-        if (base.startsWith('http:')) {
-          base = base.replace('http:', 'http://');
-        } else if (base.startsWith('https:')) {
-          base = base.replace('https:', 'https://');
-        } else {
-          base = `http://${base}`;
-        }
-      }
-
-      // Clean double slashes in protocol (e.g. http:/// -> http://)
-      base = base.replace(/:\/+(\d)/, '://$1').replace(/:\/+/, '://');
-
-      const cleanBase = base.endsWith('/') ? base.slice(0, -1) : base;
-      const finalUrl = `${cleanBase}${normalizedPath}`;
-      console.log(`[DEBUG] getApiUrl: custom override used. Base: ${customApiUrl} -> finalUrl: ${finalUrl}`);
-      return finalUrl;
-    }
-
-    if (typeof window !== 'undefined' && window.location && window.location.hostname) {
-      const { hostname, origin } = window.location;
-
-      // If we are in the Cloud (AI Studio / Production)
-      if (hostname.includes('run.app') || hostname.includes('google.com') || hostname.includes('webcontainer.io')) {
-        return path;
-      }
-
-      // If we are on localhost (web dev)
-      if (hostname === 'localhost' || hostname === '127.0.0.1') {
-        return `http://localhost:3000${path}`;
-      }
-    }
-
-    // MOBILE / EXPO GO logic
-    // Try to detect the Metro host IP automatically
-    const debuggerHost = Constants.expoConfig?.hostUri;
-    if (debuggerHost) {
-      const ip = debuggerHost.split(':')[0];
-      return `http://${ip}:3000${path}`;
-    }
-
-    // FINAL FALLBACK
-    return `https://ais-dev-hrbmnvjuqn72ok4yi7upyq-252096587423.europe-west3.run.app${path}`;
+    return `https://objetivo-similar-mobile.onrender.com${normalizedPath}`;
   };
 
   // Firebase Auth Listener
@@ -2327,7 +2274,12 @@ export default function App() {
     // Check server health
     const healthUrl = getApiUrl('/api/health');
     if (Platform.OS === 'web') {
-      fetch(healthUrl)
+      fetch(healthUrl, {
+        headers: {
+          'Bypass-Tunnel-Reminder': 'true',
+          'ngrok-skip-browser-warning': 'true'
+        }
+      })
         .then(r => r.json())
         .then(data => console.log('Backend Health (Web):', data))
         .catch(err => console.log('Backend connection failed:', err));
@@ -2336,7 +2288,13 @@ export default function App() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-      fetch(healthUrl, { signal: controller.signal })
+      fetch(healthUrl, {
+        signal: controller.signal,
+        headers: {
+          'Bypass-Tunnel-Reminder': 'true',
+          'ngrok-skip-browser-warning': 'true'
+        }
+      })
         .then(r => r.json())
         .then(data => {
           console.log('Backend Health (Mobile):', data);
@@ -2738,7 +2696,11 @@ export default function App() {
 
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Bypass-Tunnel-Reminder': 'true',
+          'ngrok-skip-browser-warning': 'true'
+        },
         body: JSON.stringify({
           uid: currentUser.id,
           newPassword: pwd,
@@ -2914,6 +2876,8 @@ export default function App() {
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
+          'Bypass-Tunnel-Reminder': 'true',
+          'ngrok-skip-browser-warning': 'true'
         },
         body: JSON.stringify({
           name: newEmployee.name,
@@ -3692,13 +3656,7 @@ export default function App() {
                       <Text style={styles.loginInfoText}>Ambiente seguro e monitorizado</Text>
                     </View>
 
-                    <TouchableOpacity
-                      onPress={() => setShowServerConfig(true)}
-                      style={{ marginTop: 32, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 8 }}
-                    >
-                      <Settings2 size={16} color="rgba(255,255,255,0.3)" />
-                      <Text style={{ color: 'rgba(255,255,255,0.3)', fontSize: 11, fontWeight: '700' }}>CONFIGURAÇÕES DE SERVIDOR</Text>
-                    </TouchableOpacity>
+
 
 
                   </View>
@@ -3733,13 +3691,6 @@ export default function App() {
               </View>
             </MotiView>
           </Modal>
-          <ServerConfigModal
-            visible={showServerConfig}
-            onClose={() => setShowServerConfig(false)}
-            apiUrl={customApiUrl}
-            onSave={setCustomApiUrl}
-            isDarkMode={isDarkMode}
-          />
         </GestureHandlerRootView>
       </SafeAreaProvider>
     );
@@ -5901,13 +5852,6 @@ export default function App() {
             </View>
           </MotiView>
         </Modal>
-        <ServerConfigModal
-          visible={showServerConfig}
-          onClose={() => setShowServerConfig(false)}
-          apiUrl={customApiUrl}
-          onSave={setCustomApiUrl}
-          isDarkMode={isDarkMode}
-        />
         <ChangePasswordModal
           visible={showChangePassword}
           onClose={() => setShowChangePassword(false)}
