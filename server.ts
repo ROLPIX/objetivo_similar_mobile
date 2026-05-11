@@ -29,6 +29,9 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
             saString = saString.slice(1, -1);
         }
         const serviceAccount = JSON.parse(saString);
+        if (serviceAccount.private_key) {
+            serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+        }
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount)
         });
@@ -99,7 +102,12 @@ apiRouter.post("/update-password", async (req, res) => {
             </div>
           `
                 });
-            } catch (err) { console.error("Email error:", err); }
+                console.log(`Password update email successfully sent to ${email}`);
+            } catch (err) {
+                console.error("Resend Email Update error:", err);
+            }
+        } else if (!resend) {
+            console.warn("RESEND_API_KEY is not defined, skipping update email.");
         }
 
         res.json({ success: true });
@@ -139,7 +147,12 @@ apiRouter.post("/register-employee", async (req, res) => {
                     subject: "Bem-vindo - Objetivo Similar",
                     html: `<div style="padding: 20px;"><h1>Olá ${name}!</h1><p>Email: ${email}</p><p>Password: ${password}</p></div>`
                 });
-            } catch (e) { }
+                console.log(`Email successfully sent to ${email}`);
+            } catch (e) {
+                console.error("Resend Email Error:", e);
+            }
+        } else {
+            console.warn("RESEND_API_KEY is not defined, skipping email sending.");
         }
 
         res.json({ success: true, uid: userRecord.uid });
