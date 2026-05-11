@@ -19,6 +19,8 @@ export const usePersistentState = <T>(key: string, initialValue: T) => {
         const saved = await AsyncStorage.getItem(key);
         if (saved !== null) {
           setState(JSON.parse(saved));
+        } else {
+          setState(initialValue);
         }
       } catch (e) {
         console.error(`Error loading state ${key}:`, e);
@@ -42,7 +44,6 @@ export const usePersistentState = <T>(key: string, initialValue: T) => {
 
 export const useSyncQueue = () => {
   const [queue, setQueue, isLoaded] = usePersistentState<SyncItem<any>[]>('os_sync_queue', []);
-  const [isSyncing, setIsSyncing] = useState(false);
 
   const addToQueue = useCallback((item: Omit<SyncItem<any>, 'timestamp'>) => {
     setQueue(prev => [...prev, { ...item, timestamp: Date.now() }]);
@@ -52,25 +53,5 @@ export const useSyncQueue = () => {
     setQueue([]);
   }, [setQueue]);
 
-  const processQueue = useCallback(async (processor: (item: SyncItem<any>) => Promise<boolean>) => {
-    if (queue.length === 0 || isSyncing) return;
-
-    setIsSyncing(true);
-    const newQueue = [...queue];
-    const failedItems: SyncItem<any>[] = [];
-
-    for (const item of newQueue) {
-      try {
-        const success = await processor(item);
-        if (!success) failedItems.push(item);
-      } catch (e) {
-        failedItems.push(item);
-      }
-    }
-
-    setQueue(failedItems);
-    setIsSyncing(false);
-  }, [queue, isSyncing, setQueue]);
-
-  return { queue, addToQueue, clearQueue, processQueue, isSyncing, isLoaded };
+  return { queue, addToQueue, clearQueue, isLoaded };
 };

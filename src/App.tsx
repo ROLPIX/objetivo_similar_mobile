@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import Constants from 'expo-constants';
 import {
   StyleSheet,
   View,
@@ -20,7 +21,9 @@ import {
   Keyboard,
   ImageBackground,
   Animated,
-  PanResponder
+  PanResponder,
+  Modal,
+  Switch
 } from 'react-native';
 import {
   format,
@@ -35,7 +38,8 @@ import {
   addDays,
   eachDayOfInterval,
   isToday,
-  startOfDay
+  startOfDay,
+  differenceInDays
 } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import {
@@ -48,6 +52,8 @@ import {
   Bell,
   MapPin,
   CheckCircle2,
+  AlertTriangle,
+  Coffee,
   ChevronRight,
   ChevronLeft,
   ChevronDown,
@@ -70,7 +76,6 @@ import {
   WifiOff,
   CloudLightning,
   RefreshCw,
-  Map as MapIcon,
   Layers,
   Maximize2,
   Timer,
@@ -93,16 +98,20 @@ import {
   Sparkles,
   Download,
   Settings,
+  Edit2,
   Truck,
   Search,
   Hammer,
   Wrench,
   Users,
   Settings2,
-  AlertTriangle
+  Trash2,
+  Eye,
+  Map as MapIcon,
 } from 'lucide-react-native';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system/legacy';
 import { View as MotiView, AnimatePresence } from 'moti';
 import { Svg, Circle as SvgCircle, Path } from 'react-native-svg';
 import { usePersistentState, useSyncQueue } from './lib/offlineStore';
@@ -119,7 +128,6 @@ import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
 import MapView, { Marker } from 'react-native-maps';
-import { Modal, Switch } from 'react-native';
 
 // Firebase Imports
 import {
@@ -145,10 +153,12 @@ import {
   deleteDoc,
   limit,
   signInWithPopup,
+  signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
   FirebaseUser
 } from './lib/firebase';
+const loginBg = { uri: 'https://images.unsplash.com/photo-1581094794329-c8112a89af12?q=80&w=2070&auto=format&fit=crop' };
 
 // Types based on Backend Schema
 type Tab = 'home' | 'projects' | 'attendance' | 'management' | 'profile';
@@ -167,6 +177,18 @@ interface AppUser {
   name?: string; // Mocked for UI
   avatar?: string;
   location_id?: string; // Construction site assignment
+  can_manage_projects?: boolean;
+  can_manage_employees?: boolean;
+  can_view_all_locations?: boolean;
+  can_view_users?: boolean;
+  last_location?: {
+    latitude: number;
+    longitude: number;
+    timestamp: string;
+    accuracy: number;
+    out_of_bounds: boolean;
+    distance: number;
+  };
 }
 
 interface WorkLocation {
@@ -183,6 +205,8 @@ interface WorkLocation {
   status?: string;
   image?: string;
   themeColor?: string;
+  start_date?: string;
+  end_date?: string;
 }
 
 interface TimeLog {
@@ -192,7 +216,7 @@ interface TimeLog {
   work_location_id?: string;
   device_id?: string;
   timestamp: string; // timestamptz
-  type: 'check_in' | 'check_out';
+  type: 'check_in' | 'check_out' | 'lunch_start' | 'lunch_end';
   latitude: number;
   longitude: number;
   valid: boolean;
@@ -255,6 +279,21 @@ interface LeaveRequest {
   start_date: string; // date
   status: string;
   type: string;
+}
+
+interface OvertimeRequest {
+  id: string;
+  created_at: string;
+  updated_at?: string;
+  user_id: string;
+  user_name: string;
+  requested_by_id?: string;
+  requested_by_name?: string;
+  date: string;
+  hours: number;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected';
+  approver_id?: string;
 }
 
 interface AuditLog {
@@ -466,7 +505,16 @@ const PunchConfirmationModal = ({
   );
 };
 
-const ProjectDetailsModal = ({ project, onClose, isDarkMode }: { project: WorkLocation, onClose: () => void, isDarkMode: boolean }) => {
+const ProjectDetailsModal = ({ project, onClose, isDarkMode, employeesList, timeLogs }: { project: WorkLocation, onClose: () => void, isDarkMode: boolean, employeesList: AppUser[], timeLogs: TimeLog[] }) => {
+  // calculate how many employees are currently clocked in at this project
+  const activeEmployees = employeesList.filter(emp => {
+    const logs = timeLogs.filter(l => l.app_user_id === emp.id).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return logs.length > 0 && (logs[0].type === 'check_in' || logs[0].type === 'lunch_start' || logs[0].type === 'lunch_end') && logs[0].work_location_id === project.id && logs[0].type !== 'lunch_start';
+  }).length;
+
+  const totalAssigned = employeesList.filter(emp => emp.location_id === project.id).length;
+
+  const startDateText = project.start_date ? format(new Date(project.start_date), "dd 'de' MMMM, yyyy", { locale: ptBR }) : 'Não definida';
   if (!project) return null;
 
   return (
@@ -538,14 +586,14 @@ const ProjectDetailsModal = ({ project, onClose, isDarkMode }: { project: WorkLo
                 <Calendar size={20} color="#64748B" />
                 <View>
                   <Text style={{ fontSize: 10, fontWeight: '800', color: '#64748B' }}>DATA DE INÍCIO</Text>
-                  <Text style={{ fontSize: 13, color: isDarkMode ? 'white' : '#14233c', fontWeight: '600' }}>14 de Março, 2026</Text>
+                  <Text style={{ fontSize: 13, color: isDarkMode ? 'white' : '#14233c', fontWeight: '600' }}>{startDateText}</Text>
                 </View>
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
                 <Users size={20} color="#64748B" />
                 <View>
                   <Text style={{ fontSize: 10, fontWeight: '800', color: '#64748B' }}>EQUIPA ALOCADA</Text>
-                  <Text style={{ fontSize: 13, color: isDarkMode ? 'white' : '#14233c', fontWeight: '600' }}>12 de 24 trabalhadores no local</Text>
+                  <Text style={{ fontSize: 13, color: isDarkMode ? 'white' : '#14233c', fontWeight: '600' }}>{activeEmployees} {totalAssigned > 0 ? `de ${totalAssigned} trabalhadores no local` : (activeEmployees === 1 ? 'trabalhador no local' : 'trabalhadores no local')}</Text>
                 </View>
               </View>
             </View>
@@ -719,15 +767,30 @@ const EmployeeDetailModal = ({
   isDarkMode,
   timeLogs = [],
   workLocations = [],
-  showNotification
+  showNotification,
+  isAdmin,
+  isManager,
+  onUpdateUser,
+  onDeleteEmployee,
+  onRequestOvertime
 }: {
   user: AppUser,
   onClose: () => void,
   isDarkMode: boolean,
   timeLogs?: TimeLog[],
   workLocations?: WorkLocation[],
-  showNotification: (title: string, message: string, type: 'success' | 'error' | 'warning') => void
+  showNotification: (title: string, message: string, type: 'success' | 'error' | 'warning') => void,
+  isAdmin?: boolean,
+  isManager?: boolean,
+  onUpdateUser?: (uid: string, data: Partial<AppUser>) => Promise<void>,
+  onDeleteEmployee?: (uid: string, name: string) => Promise<void>,
+  onRequestOvertime?: (targetId: string, targetName: string, date: string, hours: number, reason: string) => Promise<void>
 }) => {
+  const [showOvertimeForm, setShowOvertimeForm] = useState(false);
+  const [overtimeDate, setOvertimeDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [overtimeHours, setOvertimeHours] = useState('2');
+  const [overtimeReason, setOvertimeReason] = useState('');
+
   const userLogs = useMemo(() => {
     return timeLogs
       .filter(l => l.app_user_id === user.id)
@@ -768,13 +831,49 @@ const EmployeeDetailModal = ({
                 <User size={32} color="white" />
               </View>
               <View>
-                <Text style={{ fontSize: 24, fontWeight: '900', color: isDarkMode ? 'white' : '#14233c', letterSpacing: -0.5 }}>{user.name}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Text style={{ fontSize: 24, fontWeight: '900', color: isDarkMode ? 'white' : '#14233c', letterSpacing: -0.5 }}>{user.name}</Text>
+                  {user.last_location?.out_of_bounds && (
+                    <MotiView
+                      from={{ opacity: 0.4, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ loop: true, type: 'timing', duration: 1000 }}
+                      style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#ef4444', shadowColor: '#ef4444', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 1, shadowRadius: 10 }}
+                    />
+                  )}
+                </View>
                 <Text style={{ fontSize: 13, color: '#64748B', fontWeight: '500' }}>{user.email}</Text>
               </View>
             </View>
-            <TouchableOpacity onPress={onClose} style={{ width: 48, height: 48, borderRadius: 16, backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#f1f5f9', alignItems: 'center', justifyContent: 'center' }}>
-              <X size={24} color={isDarkMode ? 'white' : '#64748B'} />
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              {isManager && user.role !== 'super_admin' && (
+                <TouchableOpacity
+                  onPress={() => {
+                    Alert.alert(
+                      "Remover Funcionário",
+                      `Tem certeza que deseja remover ${user.name} do sistema? esta ação é irreversível.`,
+                      [
+                        { text: "Cancelar", style: "cancel" },
+                        {
+                          text: "Remover",
+                          style: "destructive",
+                          onPress: () => {
+                            onDeleteEmployee?.(user.id, user.name || '');
+                            onClose();
+                          }
+                        }
+                      ]
+                    );
+                  }}
+                  style={{ width: 48, height: 48, borderRadius: 16, backgroundColor: 'rgba(239,68,68,0.1)', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <Trash2 size={22} color="#ef4444" />
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity onPress={onClose} style={{ width: 48, height: 48, borderRadius: 16, backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#f1f5f9', alignItems: 'center', justifyContent: 'center' }}>
+                <X size={24} color={isDarkMode ? 'white' : '#64748B'} />
+              </TouchableOpacity>
+            </View>
           </View>
 
           <ScrollView showsVerticalScrollIndicator={false}>
@@ -821,7 +920,126 @@ const EmployeeDetailModal = ({
                   <Text style={{ fontSize: 15, fontWeight: '700', color: user.active ? '#10b981' : '#ef4444' }}>{user.active ? 'ATIVO NO SISTEMA' : 'ACESSO BLOQUEADO'}</Text>
                 </View>
               </View>
+
+              {isAdmin && (
+                <View style={{ borderTopWidth: 1, borderTopColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#e2e8f0', paddingTop: 16, gap: 12 }}>
+                  <Text style={{ fontSize: 10, fontWeight: '900', color: '#64748B' }}>PERMISSÕES ESPECIAIS</Text>
+
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: isDarkMode ? 'white' : '#14233c' }}>Ver Todas as Obras</Text>
+                      <Text style={{ fontSize: 10, color: '#64748B' }}>Permite visualizar o mapa global</Text>
+                    </View>
+                    <Switch
+                      value={user.can_view_all_locations}
+                      onValueChange={(val) => onUpdateUser?.(user.id, { can_view_all_locations: val })}
+                      trackColor={{ false: '#cbd5e1', true: '#00A3FF' }}
+                    />
+                  </View>
+
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: isDarkMode ? 'white' : '#14233c' }}>Ver Funcionários</Text>
+                      <Text style={{ fontSize: 10, color: '#64748B' }}>Permite visualizar a lista da equipa</Text>
+                    </View>
+                    <Switch
+                      value={user.can_view_users}
+                      onValueChange={(val) => onUpdateUser?.(user.id, { can_view_users: val })}
+                      trackColor={{ false: '#cbd5e1', true: '#00A3FF' }}
+                    />
+                  </View>
+
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: isDarkMode ? 'white' : '#14233c' }}>Gerir Obras</Text>
+                      <Text style={{ fontSize: 10, color: '#64748B' }}>Permite criar e editar localizações</Text>
+                    </View>
+                    <Switch
+                      value={user.can_manage_projects}
+                      onValueChange={(val) => onUpdateUser?.(user.id, { can_manage_projects: val })}
+                      trackColor={{ false: '#cbd5e1', true: '#00A3FF' }}
+                    />
+                  </View>
+
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: isDarkMode ? 'white' : '#14233c' }}>Gerir Funcionários</Text>
+                      <Text style={{ fontSize: 10, color: '#64748B' }}>Permite adicionar e remover pessoas</Text>
+                    </View>
+                    <Switch
+                      value={user.can_manage_employees}
+                      onValueChange={(val) => onUpdateUser?.(user.id, { can_manage_employees: val })}
+                      trackColor={{ false: '#cbd5e1', true: '#00A3FF' }}
+                    />
+                  </View>
+                </View>
+              )}
             </View>
+
+            {/* Overtime Request Module */}
+            {isManager && (
+              <View style={{ marginBottom: 24 }}>
+                <TouchableOpacity
+                  onPress={() => setShowOvertimeForm(!showOvertimeForm)}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(0,163,255,0.1)', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 16, alignSelf: 'flex-start' }}
+                >
+                  <Plus size={16} color="#00A3FF" />
+                  <Text style={{ fontSize: 12, fontWeight: '800', color: '#00A3FF' }}>PEDIR HORA EXTRA PARA ESTE FUNCIONÁRIO</Text>
+                </TouchableOpacity>
+
+                {showOvertimeForm && (
+                  <MotiView
+                    from={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    style={{ backgroundColor: isDarkMode ? '#1e293b' : 'white', borderRadius: 24, padding: 20, marginTop: 12, borderWidth: 1, borderColor: isDarkMode ? '#334155' : '#e2e8f0' }}
+                  >
+                    <Text style={{ fontSize: 16, fontWeight: '900', color: isDarkMode ? 'white' : '#14233c', marginBottom: 16 }}>Solicitar Hora Extra</Text>
+
+                    <View style={{ gap: 12 }}>
+                      <View>
+                        <Text style={{ fontSize: 10, fontWeight: '800', color: '#64748B', marginBottom: 4 }}>DATA</Text>
+                        <TextInput
+                          style={[styles.fieldWrapper, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#F8FAFC', color: isDarkMode ? 'white' : 'black', padding: 12, borderRadius: 12 }]}
+                          value={overtimeDate}
+                          onChangeText={setOvertimeDate}
+                          placeholder="YYYY-MM-DD"
+                        />
+                      </View>
+                      <View>
+                        <Text style={{ fontSize: 10, fontWeight: '800', color: '#64748B', marginBottom: 4 }}>HORAS</Text>
+                        <TextInput
+                          style={[styles.fieldWrapper, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#F8FAFC', color: isDarkMode ? 'white' : 'black', padding: 12, borderRadius: 12 }]}
+                          value={overtimeHours}
+                          onChangeText={setOvertimeHours}
+                          keyboardType="numeric"
+                          placeholder="2"
+                        />
+                      </View>
+                      <View>
+                        <Text style={{ fontSize: 10, fontWeight: '800', color: '#64748B', marginBottom: 4 }}>MOTIVO / OBRA</Text>
+                        <TextInput
+                          style={[styles.fieldWrapper, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#F8FAFC', color: isDarkMode ? 'white' : 'black', padding: 12, borderRadius: 12 }]}
+                          value={overtimeReason}
+                          onChangeText={setOvertimeReason}
+                          placeholder="Ex: Finalização de laje"
+                        />
+                      </View>
+
+                      <TouchableOpacity
+                        style={{ backgroundColor: '#00A3FF', height: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginTop: 8 }}
+                        onPress={() => {
+                          onRequestOvertime?.(user.id, user.name || user.email, overtimeDate, parseFloat(overtimeHours) || 2, overtimeReason);
+                          setShowOvertimeForm(false);
+                          setOvertimeReason('');
+                        }}
+                      >
+                        <Text style={{ color: 'white', fontWeight: '900' }}>ENVIAR PEDIDO AO FUNCIONÁRIO</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </MotiView>
+                )}
+              </View>
+            )}
 
             {/* Attendance History */}
             <Text style={{ fontSize: 11, fontWeight: '900', color: '#64748B', letterSpacing: 1, marginBottom: 16, marginLeft: 4 }}>HISTÓRICO RECENTE DE PONTO</Text>
@@ -1096,14 +1314,24 @@ const EmployeeDetailModal = ({
                   const { uri } = await Print.printToFileAsync({ html: htmlContent });
 
                   if (Platform.OS === 'ios' || Platform.OS === 'android') {
-                    await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf' });
+                    const pdfName = `Relacao_Ponto_${user.name.replace(/\s+/g, '_')}.pdf`;
+                    const newUri = FileSystem.cacheDirectory + pdfName;
+                    await FileSystem.deleteAsync(newUri, { idempotent: true });
+                    await FileSystem.moveAsync({
+                      from: uri,
+                      to: newUri,
+                    });
+                    await Sharing.shareAsync(newUri, {
+                      UTI: 'com.adobe.pdf',
+                      mimeType: 'application/pdf',
+                      dialogTitle: 'Compartilhar Relatório'
+                    });
                   } else {
                     // Fallback for web if needed, though expo-print handles it
                     const pdfName = `Relacao_Ponto_${user.name.replace(/\s+/g, '_')}.pdf`;
                     await Print.printAsync({ html: htmlContent });
+                    showNotification('Sucesso', 'Relatório gerado com sucesso!', 'success');
                   }
-
-                  showNotification('Sucesso', 'Relatório gerado com sucesso!', 'success');
                 } catch (error) {
                   console.error(error);
                   showNotification('Erro', 'Falha ao gerar o relatório.', 'error');
@@ -1119,18 +1347,262 @@ const EmployeeDetailModal = ({
   );
 };
 
+const ChangePasswordModal = ({
+  visible,
+  onClose,
+  onSave,
+  isDarkMode
+}: {
+  visible: boolean,
+  onClose: () => void,
+  onSave: (pwd: string) => Promise<void>,
+  isDarkMode: boolean
+}) => {
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [success, setSuccess] = useState(false);
+
+  const handleUpdate = async () => {
+    console.log('ChangePasswordModal: handleUpdate triggered');
+    if (!newPassword || newPassword.length < 6) {
+      Alert.alert("Erro", "A palavra-passe deve ter pelo menos 6 caracteres.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      Alert.alert("Erro", "As palavras-passe não coincidem.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      console.log('ChangePasswordModal: calling onSave...');
+      await onSave(newPassword);
+      console.log('ChangePasswordModal: onSave successful');
+      setSuccess(true);
+      setNewPassword('');
+      setConfirmPassword('');
+      // Auto close after 2.5 seconds
+      setTimeout(() => {
+        setSuccess(false);
+        onClose();
+      }, 2500);
+    } catch (err: any) {
+      console.log('ChangePasswordModal: onSave failed:', err.message);
+      Alert.alert("Erro na Atualização", err.message || "Não foi possível atualizar a palavra-passe.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        style={{ flex: 1 }}
+      >
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center' }}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => {
+              Keyboard.dismiss();
+              // Optionally close on backdrop press, but maybe better not to for password forms
+            }}
+          />
+          <ScrollView
+            contentContainerStyle={{ flexGrow: 1, justifyContent: 'center', padding: 20 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            <MotiView
+              from={{ opacity: 0, scale: 0.9, translateY: 30 }}
+              animate={{ opacity: 1, scale: 1, translateY: 0 }}
+              transition={{ type: 'spring', damping: 15 }}
+              style={{
+                backgroundColor: isDarkMode ? '#1e293b' : 'white',
+                borderRadius: 28,
+                padding: 24,
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 10 },
+                shadowOpacity: 0.25,
+                shadowRadius: 20,
+                elevation: 10
+              }}
+            >
+              {success ? (
+                <MotiView
+                  from={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  style={{ alignItems: 'center', paddingVertical: 20 }}
+                >
+                  <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: '#10b981', alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}>
+                    <Check size={32} color="white" />
+                  </View>
+                  <Text style={{ fontSize: 20, fontWeight: '900', color: isDarkMode ? 'white' : '#14233c', marginBottom: 8, textAlign: 'center' }}>Atualizada!</Text>
+                  <Text style={{ fontSize: 14, color: '#64748B', textAlign: 'center' }}>A tua nova palavra-passe foi guardada. Receberás um e-mail em breve.</Text>
+                </MotiView>
+              ) : (
+                <>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                    <Text style={{ fontSize: 20, fontWeight: '900', color: isDarkMode ? 'white' : '#14233c' }}>Alterar Palavra-passe</Text>
+                    <TouchableOpacity
+                      onPress={onClose}
+                      style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#f1f5f9', alignItems: 'center', justifyContent: 'center' }}
+                    >
+                      <X size={20} color={isDarkMode ? 'white' : '#64748B'} />
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={{ gap: 16, marginBottom: 24 }}>
+                    <View>
+                      <Text style={{ fontSize: 10, fontWeight: '800', color: '#00aeef', marginBottom: 8, textTransform: 'uppercase' }}>Nova Palavra-passe</Text>
+                      <View style={{ backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#f8fafc', borderRadius: 14, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, height: 50, borderWidth: 1, borderColor: isDarkMode ? 'rgba(255,255,255,0.1)' : '#e2e8f0' }}>
+                        <Lock size={18} color="#64748B" />
+                        <TextInput
+                          secureTextEntry={!showPassword}
+                          value={newPassword}
+                          onChangeText={setNewPassword}
+                          placeholder="Mínimo 6 caracteres"
+                          placeholderTextColor="#94A3B8"
+                          style={{ flex: 1, marginLeft: 12, color: isDarkMode ? 'white' : '#14233c', fontSize: 15 }}
+                        />
+                        <TouchableOpacity style={{ padding: 10 }} onPress={() => setShowPassword(!showPassword)}>
+                          <Eye size={18} color={showPassword ? '#00aeef' : '#64748B'} />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+
+                    <View>
+                      <Text style={{ fontSize: 10, fontWeight: '800', color: '#64748B', marginBottom: 8, textTransform: 'uppercase' }}>Confirmar Palavra-passe</Text>
+                      <View style={{ backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#f8fafc', borderRadius: 14, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, height: 50, borderWidth: 1, borderColor: isDarkMode ? 'rgba(255,255,255,0.1)' : '#e2e8f0' }}>
+                        <Lock size={18} color="#64748B" />
+                        <TextInput
+                          secureTextEntry={!showPassword}
+                          value={confirmPassword}
+                          onChangeText={setConfirmPassword}
+                          placeholder="Repetir palavra-passe"
+                          placeholderTextColor="#94A3B8"
+                          style={{ flex: 1, marginLeft: 12, color: isDarkMode ? 'white' : '#14233c', fontSize: 15 }}
+                        />
+                      </View>
+                    </View>
+                  </View>
+
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={handleUpdate}
+                    disabled={loading}
+                    style={{
+                      backgroundColor: '#00aeef',
+                      height: 56,
+                      borderRadius: 16,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      opacity: loading ? 0.7 : 1,
+                      shadowColor: '#00aeef',
+                      shadowOffset: { width: 0, height: 4 },
+                      shadowOpacity: 0.3,
+                      shadowRadius: 8,
+                      elevation: 4
+                    }}
+                  >
+                    {loading ? (
+                      <ActivityIndicator color="white" />
+                    ) : (
+                      <Text style={{ color: 'white', fontWeight: '900', fontSize: 16, letterSpacing: 0.5 }}>ATUALIZAR AGORA</Text>
+                    )}
+                  </TouchableOpacity>
+                </>
+              )}
+            </MotiView>
+          </ScrollView>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+};
+
+const ServerConfigModal = ({
+  visible,
+  onClose,
+  apiUrl,
+  onSave,
+  isDarkMode
+}: {
+  visible: boolean,
+  onClose: () => void,
+  apiUrl: string | null,
+  onSave: (url: string | null) => void,
+  isDarkMode: boolean
+}) => {
+  const [url, setUrl] = useState(apiUrl || '');
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 20 }}>
+        <MotiView
+          from={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          style={{ backgroundColor: isDarkMode ? '#1e293b' : 'white', borderRadius: 24, padding: 24, shadowColor: '#000', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.2, shadowRadius: 20 }}
+        >
+          <Text style={{ fontSize: 20, fontWeight: '900', color: isDarkMode ? 'white' : '#14233c', marginBottom: 8 }}>Configuração de Servidor</Text>
+          <Text style={{ fontSize: 13, color: '#64748B', marginBottom: 20 }}>
+            Utilize esta opção se estiver a testar o backend localmente no seu computador (via Metro/Expo Go).
+          </Text>
+
+          <View style={{ marginBottom: 24 }}>
+            <Text style={{ fontSize: 10, fontWeight: '800', color: '#00aeef', marginBottom: 8 }}>API URL OVERRIDE</Text>
+            <View style={{ backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#F1F5F9', borderRadius: 12, paddingHorizontal: 12, height: 48, justifyContent: 'center', borderWidth: 1, borderColor: isDarkMode ? 'rgba(255,255,255,0.1)' : '#E2E8F0' }}>
+              <TextInput
+                value={url}
+                onChangeText={setUrl}
+                placeholder="http://192.168.x.x:3000"
+                placeholderTextColor={isDarkMode ? 'rgba(255,255,255,0.3)' : '#94A3B8'}
+                style={{ color: isDarkMode ? 'white' : '#14233c', fontSize: 14 }}
+                autoCapitalize="none"
+              />
+            </View>
+            <Text style={{ fontSize: 10, color: '#94A3B8', marginTop: 8 }}>
+              Ex: http://192.168.1.100:3000. Deixe vazio para usar a deteção automática.
+            </Text>
+          </View>
+
+          <View style={{ flexDirection: 'row', gap: 12 }}>
+            <TouchableOpacity
+              onPress={onClose}
+              style={{ flex: 1, height: 48, borderRadius: 12, borderWidth: 1, borderColor: isDarkMode ? '#334155' : '#E2E8F0', alignItems: 'center', justifyContent: 'center' }}
+            >
+              <Text style={{ color: isDarkMode ? '#94A3B8' : '#64748B', fontWeight: '700' }}>CANCELAR</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => {
+                onSave(url.trim() || null);
+                onClose();
+              }}
+              style={{ flex: 1, height: 48, borderRadius: 12, backgroundColor: '#00aeef', alignItems: 'center', justifyContent: 'center' }}
+            >
+              <Text style={{ color: 'white', fontWeight: '900' }}>GUARDAR</Text>
+            </TouchableOpacity>
+          </View>
+        </MotiView>
+      </View>
+    </Modal>
+  );
+};
+
 // Removed AnimatedBackground
 
 export default function App() {
+  const [authReady, setAuthReady] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [userRole, setUserRole] = useState<AppRole>('colaborador');
-  const isGestor = ['super_admin', 'admin', 'gestor'].includes(userRole);
-  const isWorker = userRole === 'colaborador';
+  const isGestorOnly = userRole === 'gestor';
   const isAdmin = ['super_admin', 'admin'].includes(userRole);
-  const isSuperAdmin = userRole === 'super_admin';
-
+  const isWorker = userRole === 'colaborador';
+  const isGestor = ['super_admin', 'admin', 'gestor'].includes(userRole);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const currentUserRef = useRef<AppUser | null>(null);
+  const canManageSomething = isAdmin || currentUser?.can_manage_projects || currentUser?.can_manage_employees || currentUser?.can_view_users;
 
   useEffect(() => {
     currentUserRef.current = currentUser;
@@ -1157,11 +1629,14 @@ export default function App() {
     setNotification(prev => ({ ...prev, visible: false }));
   };
   const [loginForm, setLoginForm] = useState({ matricula: '', password: '' });
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<{ matricula?: string; password?: string }>({});
   const [activeTab, setActiveTab] = usePersistentState<Tab>('os_active_tab', 'home');
   const [mgmtSubTab, setMgmtSubTab] = useState<'dashboard' | 'access_control'>('dashboard');
   const [searchTerm, setSearchTerm] = useState('');
   const [isDarkMode, setIsDarkMode] = useState(false);
-  const [isClockedIn, setIsClockedIn] = usePersistentState('os_clocked_in', false);
+  const [isClockedIn, setIsClockedIn] = usePersistentState(`os_clocked_in_${currentUser?.id || 'anonymous'}`, false);
+  const [isOnLunch, setIsOnLunch] = usePersistentState(`os_on_lunch_${currentUser?.id || 'anonymous'}`, false);
   const [isOnline, setIsOnline] = useState(true);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [timeLogs, setTimeLogs] = useState<TimeLog[]>([]);
@@ -1177,6 +1652,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showProjectForm, setShowProjectForm] = useState(false);
   const [showEmployeeForm, setShowEmployeeForm] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [newEmployee, setNewEmployee] = useState({
     name: '',
     email: '',
@@ -1185,16 +1661,69 @@ export default function App() {
     endTime: '17:00',
     location_id: '',
   });
-  const [newProject, setNewProject] = useState<{ name: string; addressSearch: string; latitude: string; longitude: string; radius_meters: string }>({
+  const [newProject, setNewProject] = useState<{ name: string; addressSearch: string; latitude: string; longitude: string; radius_meters: string; start_date: string; end_date: string }>({
     name: '',
     addressSearch: '',
     latitude: '',
     longitude: '',
-    radius_meters: '500' // default
+    radius_meters: '500', // default
+    start_date: format(new Date(), 'yyyy-MM-dd'),
+    end_date: format(addMonths(new Date(), 6), 'yyyy-MM-dd')
   });
   const [isCapturingLocation, setIsCapturingLocation] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [errorStatus, setErrorStatus] = useState<{ message?: string, error?: string, path?: string, type?: string } | null>(null);
+
+  const visibleWorkLocations = useMemo(() => {
+    if (isAdmin || (isGestorOnly && currentUser?.can_view_all_locations)) {
+      return workLocations;
+    }
+    return (workLocations || []).filter(loc => loc.id === currentUser?.location_id);
+  }, [workLocations, isAdmin, isGestorOnly, currentUser]);
+
+  const visibleEmployees = useMemo(() => {
+    if (isAdmin) return employeesList;
+
+    if (isGestorOnly) {
+      // If they have the specific permission to view users
+      if (currentUser?.can_view_users) {
+        // If they also have permission to see all locations, they see everyone
+        if (currentUser?.can_view_all_locations) {
+          return employeesList;
+        }
+        // Otherwise they see their assigned location team
+        if (currentUser?.location_id) {
+          return employeesList.filter(emp =>
+            (emp.location_id === currentUser.location_id || emp.id === currentUser.id) &&
+            emp.role !== 'admin' && emp.role !== 'super_admin'
+          );
+        }
+      }
+      // If no view permission, or no location, only see self
+      return employeesList.filter(emp => emp.id === currentUser?.id);
+    }
+
+    return employeesList.filter(emp => emp.id === currentUser?.id);
+  }, [employeesList, isAdmin, isGestorOnly, currentUser]);
+
+  const visibleTimeLogs = useMemo(() => {
+    if (isAdmin || (isGestorOnly && currentUser?.can_view_users)) {
+      return timeLogs;
+    }
+    const visibleEmpIds = new Set(visibleEmployees.map(e => e.id));
+    return timeLogs.filter(log => visibleEmpIds.has(log.app_user_id));
+  }, [timeLogs, visibleEmployees, isAdmin, isGestorOnly, currentUser]);
+
+  const todayStats = useMemo(() => {
+    if (!currentUser) return { hasCheckIn: false, hasCheckOut: false, hasLunchStart: false, hasLunchEnd: false };
+    const todayLogs = timeLogs.filter(l => l.app_user_id === currentUser.id && isSameDay(new Date(l.timestamp), new Date()));
+    return {
+      hasCheckIn: todayLogs.some(l => l.type === 'check_in'),
+      hasCheckOut: todayLogs.some(l => l.type === 'check_out'),
+      hasLunchStart: todayLogs.some(l => l.type === 'lunch_start'),
+      hasLunchEnd: todayLogs.some(l => l.type === 'lunch_end'),
+    };
+  }, [timeLogs, currentUser]);
 
   // Error Modal Component
   const ErrorModal = () => {
@@ -1268,6 +1797,7 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [currentSlide, setCurrentSlide] = useState(0);
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
+  const [overtimeRequests, setOvertimeRequests] = useState<OvertimeRequest[]>([]);
   const [attendancePolicies, setAttendancePolicies] = useState<AttendancePolicy>({
     id: 'pol-1', created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     allow_remote_work: false, max_allowed_distance_meters: 500, max_late_minutes: 15, require_geolocation: true
@@ -1285,24 +1815,73 @@ export default function App() {
   const [isFloatingMenuOpen, setIsFloatingMenuOpen] = useState(false);
   const [currentCalendarDate, setCurrentCalendarDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(startOfDay(new Date()));
+  const [showOvertimeForm, setShowOvertimeForm] = useState(false);
+  const [overtimeDate, setOvertimeDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [overtimeHours, setOvertimeHours] = useState('2');
+  const [overtimeReason, setOvertimeReason] = useState('');
   const [assigningEmployeeId, setAssigningEmployeeId] = useState<string | null>(null);
 
-  const monthlyHours = useMemo(() => {
-    if (!currentUser) return '0h';
-    const monthStart = startOfMonth(currentCalendarDate);
-    const monthEnd = endOfMonth(currentCalendarDate);
+  const managementStats = useMemo(() => {
+    if (!isGestor) return { workingCount: 0, alertsToday: 0, pendingLeaves: 0 };
 
-    // Filter logs for this month and this user
-    const monthLogs = timeLogs.filter(log => {
+    const workingCount = visibleEmployees.filter(e =>
+      visibleTimeLogs.some(l => l.app_user_id === e.id && l.type === 'check_in' && isToday(new Date(l.timestamp)))
+    ).length;
+
+    const alertsToday = notifications.filter(n =>
+      isToday(new Date(n.timestamp)) && n.type === 'warning'
+    ).length;
+
+    const pendingLeaves = leaveRequests.filter(lr => lr.status === 'pending').length;
+
+    return { workingCount, alertsToday, pendingLeaves };
+  }, [isGestor, visibleEmployees, visibleTimeLogs, notifications, leaveRequests]);
+
+  const filteredEmployeesForMgmt = useMemo(() => {
+    if (!isGestor) return [];
+    return visibleEmployees
+      .filter(emp => {
+        if (isAdmin) return currentUser?.role === 'super_admin' || emp.role !== 'super_admin';
+        return emp.role !== 'admin' && emp.role !== 'super_admin';
+      })
+      .filter(e =>
+        e.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        e.email?.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+  }, [isGestor, visibleEmployees, isAdmin, currentUser, searchTerm]);
+
+  const [showWorkScheduleForm, setShowWorkScheduleForm] = useState(false);
+  const [newSchedule, setNewSchedule] = useState<Partial<WorkSchedule>>({
+    day_of_week: 'Segunda-feira',
+    start_time: '08:00',
+    end_time: '17:00'
+  });
+
+  const handleAddSchedule = async () => {
+    if (!isAdmin && !currentUser?.can_manage_employees) return;
+    try {
+      const scheduleData = {
+        ...newSchedule,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        active: true
+      };
+      await addDoc(collection(db, 'work_schedules'), scheduleData);
+      showNotification('Sucesso', 'Horário de trabalho adicionado.', 'success');
+      setShowWorkScheduleForm(false);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'work_schedules');
+    }
+  };
+
+  const calculateTotalMinutes = (userLogs: TimeLog[], startDate: Date, endDate: Date) => {
+    const logsInRange = userLogs.filter(log => {
       const logDate = new Date(log.timestamp);
-      return log.app_user_id === currentUser.id &&
-        logDate >= monthStart &&
-        logDate <= monthEnd;
+      return logDate >= startDate && logDate <= endDate;
     });
 
-    // Group by day
     const dayGroups: { [key: string]: TimeLog[] } = {};
-    monthLogs.forEach(log => {
+    logsInRange.forEach(log => {
       const d = format(new Date(log.timestamp), 'yyyy-MM-dd');
       if (!dayGroups[d]) dayGroups[d] = [];
       dayGroups[d].push(log);
@@ -1310,17 +1889,342 @@ export default function App() {
 
     let totalMs = 0;
     Object.values(dayGroups).forEach(logs => {
-      const checkIn = logs.find(l => l.type === 'check_in');
-      const checkOut = logs.find(l => l.type === 'check_out');
-      if (checkIn && checkOut) {
-        totalMs += new Date(checkOut.timestamp).getTime() - new Date(checkIn.timestamp).getTime();
+      const sortedLogs = [...logs].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+      let dayStart: number | null = null;
+      let lunchStart: number | null = null;
+      let dayMs = 0;
+      let lunchMs = 0;
+
+      sortedLogs.forEach(l => {
+        if (l.type === 'check_in' && !dayStart) dayStart = new Date(l.timestamp).getTime();
+        if (l.type === 'lunch_start' && dayStart && !lunchStart) lunchStart = new Date(l.timestamp).getTime();
+        if (l.type === 'lunch_end' && lunchStart) {
+          lunchMs += new Date(l.timestamp).getTime() - lunchStart;
+          lunchStart = null;
+        }
+        if (l.type === 'check_out' && dayStart) {
+          dayMs += new Date(l.timestamp).getTime() - dayStart;
+          dayStart = null;
+        }
+      });
+
+      // If finished day but lunch was still active (unlikely but safe)
+      if (lunchStart && !dayStart) {
+        // Should have been closed by checkout, but if not we ignore it or cap it
       }
+
+      totalMs += (dayMs - lunchMs);
     });
 
-    const hours = Math.floor(totalMs / (1000 * 60 * 60));
-    const mins = Math.floor((totalMs % (1000 * 60 * 60)) / (1000 * 60));
-    return `${hours}h ${mins}m`;
-  }, [timeLogs, currentCalendarDate, currentUser]);
+    return Math.floor(totalMs / (1000 * 60));
+  };
+
+  const formatMinutes = (totalMins: number) => {
+    const h = Math.floor(totalMins / 60);
+    const m = totalMins % 60;
+    return `${h}h ${m}m`;
+  };
+
+  const monthlyHours = useMemo(() => {
+    if (!currentUser) return '0h 0m';
+    const monthStart = startOfMonth(new Date());
+    const monthEnd = endOfMonth(new Date());
+    const totalMins = calculateTotalMinutes(timeLogs.filter(l => l.app_user_id === currentUser.id), monthStart, monthEnd);
+    return formatMinutes(totalMins);
+  }, [timeLogs, currentUser]);
+
+  const handleExportIndividual = async (user: AppUser) => {
+    try {
+      showNotification('A exportar...', `Gerando relatório individual para ${user.name}`, 'success');
+
+      const monthStart = startOfMonth(new Date());
+      const monthEnd = endOfMonth(new Date());
+      const userLogsInRange = timeLogs.filter(l => l.app_user_id === user.id && new Date(l.timestamp) >= monthStart && new Date(l.timestamp) <= monthEnd)
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+      const totalMins = calculateTotalMinutes(timeLogs.filter(l => l.app_user_id === user.id), monthStart, monthEnd);
+
+      const individualQrData = JSON.stringify({
+        type: 'INDIVIDUAL_REPORT',
+        user_id: user.id,
+        period: format(monthStart, 'MM/yyyy'),
+        generated_at: new Date().toISOString()
+      });
+      const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(individualQrData)}`;
+
+      const dayGroups: { [key: string]: TimeLog[] } = {};
+      userLogsInRange.forEach(log => {
+        const d = format(new Date(log.timestamp), 'yyyy-MM-dd');
+        if (!dayGroups[d]) dayGroups[d] = [];
+        dayGroups[d].push(log);
+      });
+
+      const dailyRows = Object.keys(dayGroups).sort().map(d => {
+        const logs = [...dayGroups[d]].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+        let entrada = '-';
+        let saida = '-';
+        let almoco = '-';
+        let obra = logs.length > 0 ? (logs[0].location_name || 'Desconhecida') : '-';
+
+        if (logs.length > 0) entrada = format(new Date(logs[0].timestamp), 'HH:mm');
+        if (logs.length > 1) {
+          saida = format(new Date(logs[logs.length - 1].timestamp), 'HH:mm');
+        }
+
+        let customDayMs = 0;
+        let currentIn: number | null = null;
+        for (let i = 0; i < logs.length; i++) {
+          if (logs[i].type === 'check_in') {
+            currentIn = new Date(logs[i].timestamp).getTime();
+          } else if (logs[i].type === 'check_out' && currentIn) {
+            customDayMs += new Date(logs[i].timestamp).getTime() - currentIn;
+            currentIn = null;
+          }
+        }
+
+        let gapMs = 0;
+        if (logs.length >= 4) {
+          const firstOut = logs.find(l => l.type === 'check_out');
+          const lastIn = [...logs].reverse().find(l => l.type === 'check_in');
+          if (firstOut && lastIn && firstOut.id !== lastIn.id) {
+            gapMs = new Date(lastIn.timestamp).getTime() - new Date(firstOut.timestamp).getTime();
+          }
+        }
+
+        if (gapMs > 0) almoco = formatMinutes(Math.floor(gapMs / 60000));
+        const total = formatMinutes(Math.floor(customDayMs / 60000));
+
+        return `
+          <tr>
+            <td><strong>${format(new Date(d), 'dd/MM/yyyy')}</strong></td>
+            <td>${obra}</td>
+            <td><span class="badge badge-in">${entrada}</span></td>
+            <td><span class="badge badge-out">${saida}</span></td>
+            <td>${almoco}</td>
+            <td><strong>${total}</strong></td>
+          </tr>
+        `;
+      }).join('');
+
+      const htmlContent = `
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <style>
+              @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+              body { font-family: 'Inter', sans-serif; padding: 40px; color: #1e293b; line-height: 1.5; }
+              .header { display: flex; justify-content: space-between; border-bottom: 2px solid #0ea5e9; padding-bottom: 20px; margin-bottom: 30px; }
+              .logo-container h1 { margin: 0; color: #14233c; font-size: 24px; font-weight: 900; }
+              .logo-container p { margin: 2px 0 0; color: #0ea5e9; font-weight: 700; font-size: 13px; text-transform: uppercase; }
+              .logo-container span.sub { display: block; color: #9ca3af; font-weight: 700; font-size: 11px; margin-top: 2px; }
+              .summary { display: flex; gap: 20px; margin-bottom: 30px; }
+              .stat-box { flex: 1; background: #f8fafc; border: 1px solid #e2e8f0; padding: 15px; border-radius: 12px; }
+              .stat-label { font-size: 10px; color: #64748b; font-weight: 800; text-transform: uppercase; margin-bottom: 5px; }
+              .stat-value { font-size: 18px; font-weight: 900; color: #0f172a; }
+              table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 11px; }
+              th { text-align: left; background: #14233c; padding: 12px 15px; color: white; font-weight: 700; text-transform: uppercase; font-size: 10px; }
+              td { padding: 12px 15px; border-bottom: 1px solid #f1f5f9; }
+              .badge { padding: 4px 8px; border-radius: 6px; font-weight: 700; font-size: 11px; }
+              .badge-in { background: #dcfce7; color: #166534; }
+              .badge-out { background: #fee2e2; color: #991b1b; }
+              .qr-container { text-align: right; }
+              .qr-img { width: 80px; height: 80px; border: 1px solid #e2e8f0; border-radius: 10px; }
+              .footer { margin-top: 50px; text-align: center; font-size: 10px; color: #9ca3af; font-weight: 700; }
+              .total-footer { margin-top: 20px; text-align: right; font-size: 14px; color: #14233c; }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <div class="logo-container">
+                <h1>OBJETIVO SIMILAR</h1>
+                <p>CONSTRUÇÕES UNIPESSOAL LDA</p>
+                <span class="sub">CONSTRUÇÃO CIVIL E ENGENHARIA</span>
+              </div>
+              <div class="qr-container">
+                <img src="${qrCodeUrl}" class="qr-img" />
+              </div>
+            </div>
+
+            <h2 style="font-size: 16px; color: #14233c; border-left: 4px solid #0ea5e9; padding-left: 10px;">RELATÓRIO DO MÊS - ${format(monthStart, 'MMMM yyyy', { locale: ptBR }).toUpperCase()}</h2>
+
+            <div class="summary">
+              <div class="stat-box">
+                <div class="stat-label">Funcionário</div>
+                <div class="stat-value">${user.name.toUpperCase()}</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Total Gasto</div>
+                <div class="stat-value">${formatMinutes(totalMins)}</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Dias Trabalhados</div>
+                <div class="stat-value">${Object.keys(dayGroups).length}</div>
+              </div>
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>Dia</th>
+                  <th>Obra</th>
+                  <th>Entrada</th>
+                  <th>Saída</th>
+                  <th>Almoço</th>
+                  <th>Horas Trabalhado</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${dailyRows}
+              </tbody>
+            </table>
+
+            <div class="total-footer">
+              <strong>TOTAL DE HORAS:</strong> ${formatMinutes(totalMins)}
+            </div>
+
+            <div class="footer">
+              RELATÓRIO DE PRESENÇAS E HORAS MENSAL GERADO EM ${format(new Date(), 'dd/MM/yyyy HH:mm:ss')}<br/>
+              © ${new Date().getFullYear()} OBJETIVO SIMILAR LDA
+            </div>
+          </body>
+        </html>
+      `;
+
+      if (Platform.OS === 'web') {
+        await Print.printAsync({ html: htmlContent });
+      } else {
+        const { uri } = await Print.printToFileAsync({ html: htmlContent });
+        const pdfName = `Relatorio_Individual_${user.name.replace(/\s+/g, '_')}.pdf`;
+        const newUri = FileSystem.cacheDirectory + pdfName;
+        await FileSystem.deleteAsync(newUri, { idempotent: true });
+        await FileSystem.moveAsync({
+          from: uri,
+          to: newUri,
+        });
+        await Sharing.shareAsync(newUri, {
+          UTI: 'com.adobe.pdf',
+          mimeType: 'application/pdf',
+          dialogTitle: 'Compartilhar Relatório Individual'
+        });
+      }
+    } catch (error) {
+      console.error(error);
+      showNotification('Erro', 'Falha ao gerar PDF individual.', 'error');
+    }
+  };
+
+  const handleExportGeneral = async () => {
+    try {
+      showNotification('Relatório Coletivo', 'Compilando total de horas de todos os colaboradores...', 'success');
+
+      const monthStart = startOfMonth(new Date());
+      const monthEnd = endOfMonth(new Date());
+
+      const collectiveQrData = JSON.stringify({
+        type: 'COLLECTIVE_REPORT',
+        period: format(monthStart, 'MM/yyyy'),
+        generated_at: new Date().toISOString()
+      });
+      const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(collectiveQrData)}`;
+
+      let usersSummaryHtml = '';
+
+      employeesList.forEach((user) => {
+        const totalMins = calculateTotalMinutes(timeLogs.filter(l => l.app_user_id === user.id), monthStart, monthEnd);
+        const loc = workLocations.find(w => w.id === user.location_id);
+        const locationName = loc ? loc.name : 'Não Definida';
+
+        usersSummaryHtml += `
+          <tr>
+            <td><strong>${user.name}</strong></td>
+            <td>${user.email}</td>
+            <td>${locationName}</td>
+            <td>${user.role.toUpperCase()}</td>
+            <td style="text-align: right; font-weight: 900; color: #00A3FF;">${formatMinutes(totalMins)}</td>
+          </tr>
+        `;
+      });
+
+      const htmlContent = `
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <style>
+              @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+              body { font-family: 'Inter', sans-serif; padding: 40px; color: #1e293b; line-height: 1.5; }
+              .header { display: flex; justify-content: space-between; border-bottom: 2px solid #0ea5e9; padding-bottom: 20px; margin-bottom: 30px; }
+              .logo-container h1 { margin: 0; color: #14233c; font-size: 24px; font-weight: 900; line-height: 1.1; }
+              .logo-container p { margin: 2px 0 0; color: #0ea5e9; font-weight: 700; font-size: 13px; text-transform: uppercase; }
+              .logo-container span.sub { display: block; color: #9ca3af; font-weight: 700; font-size: 11px; margin-top: 2px; }
+              table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 11px; }
+              th { text-align: left; background: #14233c; padding: 12px 15px; color: white; font-weight: 700; text-transform: uppercase; font-size: 10px; }
+              td { padding: 12px 15px; border-bottom: 1px solid #f1f5f9; }
+              .qr-container { text-align: right; }
+              .qr-img { width: 80px; height: 80px; border: 1px solid #e2e8f0; border-radius: 10px; }
+              .footer { margin-top: 50px; text-align: center; font-size: 10px; color: #9ca3af; font-weight: 700; }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <div class="logo-container">
+                <h1>OBJETIVO SIMILAR</h1>
+                <p>CONSTRUÇÕES UNIPESSOAL LDA</p>
+                <span class="sub">CONSTRUÇÃO CIVIL E ENGENHARIA</span>
+              </div>
+              <div class="qr-container">
+                <img src="${qrCodeUrl}" class="qr-img" />
+              </div>
+            </div>
+
+            <h2 style="font-size: 16px; color: #14233c; border-left: 4px solid #0ea5e9; padding-left: 10px;">RELATÓRIO GERAL MENSAL - ${format(monthStart, 'MMMM yyyy', { locale: ptBR }).toUpperCase()}</h2>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>Nome do Funcionário</th>
+                  <th>Email</th>
+                  <th>Obra Principal</th>
+                  <th>Cargo</th>
+                  <th style="text-align: right;">Total Trabalhado</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${usersSummaryHtml}
+              </tbody>
+            </table>
+
+            <div class="footer">
+              RESUMO DE HORAS MENSAL GERADO EM ${format(new Date(), 'dd/MM/yyyy HH:mm:ss')}<br/>
+              © ${new Date().getFullYear()} OBJETIVO SIMILAR LDA
+            </div>
+          </body>
+        </html>
+      `;
+
+      if (Platform.OS === 'web') {
+        await Print.printAsync({ html: htmlContent });
+      } else {
+        const { uri } = await Print.printToFileAsync({ html: htmlContent });
+        const pdfName = `Relatorio_Geral_${format(new Date(), 'MMyyyy')}.pdf`;
+        const newUri = FileSystem.cacheDirectory + pdfName;
+        await FileSystem.deleteAsync(newUri, { idempotent: true });
+        await FileSystem.moveAsync({
+          from: uri,
+          to: newUri,
+        });
+        await Sharing.shareAsync(newUri, {
+          UTI: 'com.adobe.pdf',
+          mimeType: 'application/pdf',
+          dialogTitle: 'Compartilhar Relatório Coletivo'
+        });
+      }
+    } catch (err) {
+      console.error(err);
+      showNotification('Erro Exportação', 'Não foi possível compilar o relatório coletivo.', 'error');
+    }
+  };
 
   /* Removed Draggable FAB logic */
 
@@ -1357,58 +2261,240 @@ export default function App() {
     seedUsers();
   }, []);
 
+  const [customApiUrl, setCustomApiUrl] = usePersistentState<string | null>('os_custom_api_url', null);
+  const [showServerConfig, setShowServerConfig] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);
+
+  const getApiUrl = (path: string) => {
+    if (path.startsWith('http')) return path;
+
+    // Ensure path starts with /
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+
+    // User override
+    if (customApiUrl) {
+      let base = customApiUrl.trim();
+
+      // If it doesn't have a protocol, add http://
+      if (!base.includes('://')) {
+        // If it was something like "http:192.168.1.1" (typo)
+        if (base.startsWith('http:')) {
+          base = base.replace('http:', 'http://');
+        } else if (base.startsWith('https:')) {
+          base = base.replace('https:', 'https://');
+        } else {
+          base = `http://${base}`;
+        }
+      }
+
+      // Clean double slashes in protocol (e.g. http:/// -> http://)
+      base = base.replace(/:\/+(\d)/, '://$1').replace(/:\/+/, '://');
+
+      const cleanBase = base.endsWith('/') ? base.slice(0, -1) : base;
+      const finalUrl = `${cleanBase}${normalizedPath}`;
+      console.log(`[DEBUG] getApiUrl: custom override used. Base: ${customApiUrl} -> finalUrl: ${finalUrl}`);
+      return finalUrl;
+    }
+
+    if (typeof window !== 'undefined' && window.location && window.location.hostname) {
+      const { hostname, origin } = window.location;
+
+      // If we are in the Cloud (AI Studio / Production)
+      if (hostname.includes('run.app') || hostname.includes('google.com') || hostname.includes('webcontainer.io')) {
+        return path;
+      }
+
+      // If we are on localhost (web dev)
+      if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return `http://localhost:3000${path}`;
+      }
+    }
+
+    // MOBILE / EXPO GO logic
+    // Try to detect the Metro host IP automatically
+    const debuggerHost = Constants.expoConfig?.hostUri;
+    if (debuggerHost) {
+      const ip = debuggerHost.split(':')[0];
+      return `http://${ip}:3000${path}`;
+    }
+
+    // FINAL FALLBACK
+    return `https://ais-dev-hrbmnvjuqn72ok4yi7upyq-252096587423.europe-west3.run.app${path}`;
+  };
+
   // Firebase Auth Listener
   useEffect(() => {
+    // Check server health
+    const healthUrl = getApiUrl('/api/health');
+    if (Platform.OS === 'web') {
+      fetch(healthUrl)
+        .then(r => r.json())
+        .then(data => console.log('Backend Health (Web):', data))
+        .catch(err => console.log('Backend connection failed:', err));
+    } else {
+      // No telemóvel, usamos um timeout menor para não travar o arranque
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+      fetch(healthUrl, { signal: controller.signal })
+        .then(r => r.json())
+        .then(data => {
+          console.log('Backend Health (Mobile):', data);
+          clearTimeout(timeoutId);
+        })
+        .catch(err => {
+          console.log('Backend mobile health check failed - Using Cloud fallback');
+          clearTimeout(timeoutId);
+        });
+    }
+
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
-        setIsAuthenticated(true);
         try {
           // Fetch or create user in Firestore
           const userDocRef = doc(db, 'users', user.uid);
           const userDoc = await getDoc(userDocRef);
 
-          const isSuperAdmin = user.email === 'ronaldojiconda@gmail.com';
+          const isAdminEmail = user.email === 'ronaldojiconda@gmail.com';
+          const isSuperAdminEmail = user.email === 'ronaldopaulino32@hotmail.com';
+
+          console.log('Auth check for:', user.email, 'isAdmin:', isAdminEmail, 'isSuperAdmin:', isSuperAdminEmail);
 
           if (userDoc.exists()) {
             const userData = userDoc.data() as AppUser;
-            // Ensure super_admin always has the role even if DB says otherwise initially
-            if (isSuperAdmin && userData.role !== 'super_admin') {
+            console.log('UserData from Firestore:', userData.role);
+            // Force roles for specific emails if they mismatch
+            if (isSuperAdminEmail && userData.role !== 'super_admin') {
               userData.role = 'super_admin';
               await updateDoc(userDocRef, { role: 'super_admin' });
+            } else if (isAdminEmail && userData.role !== 'admin' && userData.role !== 'super_admin') {
+              userData.role = 'admin';
+              await updateDoc(userDocRef, { role: 'admin' });
             }
             setCurrentUser(userData);
             setUserRole(userData.role || 'colaborador');
           } else {
+            const role = isSuperAdminEmail ? 'super_admin' : (isAdminEmail ? 'admin' : 'colaborador');
             const newUser: AppUser = {
               id: user.uid,
               email: user.email || '',
               keycloak_user_id: user.uid,
               active: true,
-              role: isSuperAdmin ? 'super_admin' : 'colaborador',
+              role: role as AppRole,
               name: user.displayName || 'Utilizador',
               avatar: user.photoURL || '',
               created_at: new Date().toISOString()
             };
             await setDoc(userDocRef, newUser);
             setCurrentUser(newUser);
-            setUserRole(isSuperAdmin ? 'super_admin' : 'colaborador');
+            setUserRole(role);
           }
+          setIsAuthenticated(true);
         } catch (error) {
           console.error("Error checking/creating user profile:", error);
-          handleFirestoreError(error, OperationType.GET, 'users');
+          // Fallback if firestore fails
+          setIsAuthenticated(true);
         }
       } else {
-        // Only reset if we are not using the personalized login (which doesn't set auth.currentUser)
-        if (!currentUserRef.current) {
-          setIsAuthenticated(false);
-          setCurrentUser(null);
-          setUserRole('colaborador');
-        }
+        setIsAuthenticated(false);
+        setCurrentUser(null);
+        setUserRole('colaborador');
       }
+      setAuthReady(true);
       setIsLoading(false);
     });
     return () => unsubscribe();
   }, []); // Only once on mount
+
+  // Real-time location tracking for clocked-in users
+  useEffect(() => {
+    if (!isAuthenticated || !currentUser || !isClockedIn) return;
+
+    let locationUnsub: any = null;
+
+    const startTracking = async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+
+        locationUnsub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            distanceInterval: 50,
+            timeInterval: 60000,
+          },
+          async (location) => {
+            const { latitude, longitude, accuracy } = location.coords;
+            const userRef = doc(db, 'users', currentUser.id);
+            let outOfBounds = false;
+            let distToSite = 0;
+
+            if (currentUser.location_id) {
+              const assignedSite = workLocations.find(l => l.id === currentUser.location_id);
+              if (assignedSite) {
+                distToSite = getDistanceFromLatLonInM(latitude, longitude, assignedSite.latitude, assignedSite.longitude);
+                if (distToSite > (assignedSite.radius_meters || 500)) {
+                  outOfBounds = true;
+                }
+              }
+            }
+
+            try {
+              await updateDoc(userRef, {
+                last_location: {
+                  latitude,
+                  longitude,
+                  accuracy: accuracy || 0,
+                  timestamp: new Date().toISOString(),
+                  out_of_bounds: outOfBounds,
+                  distance: distToSite
+                },
+                updated_at: new Date().toISOString()
+              });
+
+              await addDoc(collection(db, 'user_location_history'), {
+                keycloak_user_id: currentUser.id,
+                latitude,
+                longitude,
+                accuracy: accuracy || 0,
+                source: 'periodic_tracking',
+                timestamp: new Date().toISOString()
+              });
+            } catch (err) {
+              console.error("Error updating tracking:", err);
+            }
+          }
+        );
+      } catch (err) {
+        console.error("Tracking setup error:", err);
+      }
+    };
+
+    startTracking();
+
+    return () => {
+      if (locationUnsub && locationUnsub.remove) {
+        locationUnsub.remove();
+      }
+    };
+  }, [isAuthenticated, currentUser, isClockedIn, workLocations]);
+
+  // Sync user location history for managers
+  useEffect(() => {
+    if (!isAuthenticated || !currentUser || !isGestor) return;
+
+    const historyUnsub = onSnapshot(
+      query(collection(db, 'user_location_history'), orderBy('timestamp', 'desc'), limit(500)),
+      (snapshot) => {
+        setUserLocationHistory(snapshot.docs.map(d => ({ ...d.data(), id: d.id } as UserLocationHistory)));
+      },
+      (error) => {
+        console.error("Error syncing history:", error);
+      }
+    );
+
+    return () => historyUnsub();
+  }, [isAuthenticated, currentUser, isGestor]);
 
   // Firestore Sync Listeners
   useEffect(() => {
@@ -1427,19 +2513,31 @@ export default function App() {
     });
 
     // Time Logs (Filtered for current user unless manager)
-    const logsQuery = isGestor
-      ? query(collection(db, 'time_logs'), orderBy('timestamp', 'desc'))
-      : query(collection(db, 'time_logs'), where('app_user_id', '==', currentUser.id), orderBy('timestamp', 'desc'));
+    const logsQuery = (isAdmin || currentUser?.can_view_users)
+      ? query(collection(db, 'time_logs'), orderBy('timestamp', 'desc'), limit(3000))
+      : query(collection(db, 'time_logs'), where('app_user_id', '==', currentUser.id), orderBy('timestamp', 'desc'), limit(1500));
 
     const logsUnsub = onSnapshot(logsQuery, (snapshot) => {
       const logs = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as TimeLog));
       setTimeLogs(logs);
 
-      // Update check-in status from most recent log
-      if (logs.length > 0 && logs[0].type) {
-        setIsClockedIn(logs[0].type === 'check_in');
-      } else {
-        setIsClockedIn(false);
+      // Update check-in status from most recent log of the current user
+      if (currentUser) {
+        const myLogs = logs.filter(l => l.app_user_id === currentUser.id);
+        if (myLogs.length > 0 && myLogs[0].type) {
+          const logTimestamp = new Date(myLogs[0].timestamp);
+          if (isSameDay(logTimestamp, new Date())) {
+            const latestType = myLogs[0].type;
+            setIsClockedIn(latestType === 'check_in' || latestType === 'lunch_start' || latestType === 'lunch_end');
+            setIsOnLunch(latestType === 'lunch_start');
+          } else {
+            setIsClockedIn(false);
+            setIsOnLunch(false);
+          }
+        } else {
+          setIsClockedIn(false);
+          setIsOnLunch(false);
+        }
       }
     }, (error) => {
       try {
@@ -1450,9 +2548,9 @@ export default function App() {
     });
 
     // Leave Requests
-    const leaveQuery = isGestor
-      ? query(collection(db, 'leave_requests'), orderBy('created_at', 'desc'))
-      : query(collection(db, 'leave_requests'), where('keycloak_user_id', '==', currentUser.id), orderBy('created_at', 'desc'));
+    const leaveQuery = (isAdmin || currentUser?.can_view_users)
+      ? query(collection(db, 'leave_requests'), orderBy('created_at', 'desc'), limit(500))
+      : query(collection(db, 'leave_requests'), where('keycloak_user_id', '==', currentUser.id), orderBy('created_at', 'desc'), limit(100));
 
     const leaveUnsub = onSnapshot(leaveQuery, (snapshot) => {
       setLeaveRequests(snapshot.docs.map(d => ({ ...d.data(), id: d.id } as LeaveRequest)));
@@ -1465,15 +2563,30 @@ export default function App() {
     });
 
     // Global Notifications History
-    const allNotifsQuery = isGestor
-      ? query(collection(db, 'notifications'), orderBy('timestamp', 'desc'), limit(20))
-      : query(collection(db, 'notifications'), where('app_user_id', 'in', [currentUser.id, 'all']), orderBy('timestamp', 'desc'), limit(20));
+    const allNotifsQuery = (isAdmin || currentUser?.can_view_users)
+      ? query(collection(db, 'notifications'), orderBy('timestamp', 'desc'), limit(50))
+      : query(collection(db, 'notifications'), where('app_user_id', 'in', [currentUser.id, 'all']), orderBy('timestamp', 'desc'), limit(50));
 
     const allNotifsUnsub = onSnapshot(allNotifsQuery, (snap) => {
       setNotifications(snap.docs.map(d => ({ ...d.data(), id: d.id } as NotificationItem)));
     }, (error) => {
       try {
         handleFirestoreError(error, OperationType.GET, 'notifications');
+      } catch (e: any) {
+        setErrorStatus(JSON.parse(e.message));
+      }
+    });
+
+    // Overtime Requests
+    const overtimeQuery = (isAdmin || currentUser?.can_view_users)
+      ? query(collection(db, 'overtime_requests'), orderBy('created_at', 'desc'), limit(500))
+      : query(collection(db, 'overtime_requests'), where('user_id', '==', currentUser.id), orderBy('created_at', 'desc'), limit(100));
+
+    const overtimeUnsub = onSnapshot(overtimeQuery, (snapshot) => {
+      setOvertimeRequests(snapshot.docs.map(d => ({ ...d.data(), id: d.id } as OvertimeRequest)));
+    }, (error) => {
+      try {
+        handleFirestoreError(error, OperationType.GET, 'overtime_requests');
       } catch (e: any) {
         setErrorStatus(JSON.parse(e.message));
       }
@@ -1494,7 +2607,7 @@ export default function App() {
 
     // Employee List (Managers only)
     let usersUnsub = () => { };
-    if (isGestor) {
+    if (isAdmin || (isGestorOnly && currentUser?.can_view_users)) {
       usersUnsub = onSnapshot(collection(db, 'users'), (snapshot) => {
         setEmployeesList(snapshot.docs.map(d => ({ ...d.data(), id: d.id } as AppUser)));
       }, (error) => {
@@ -1510,9 +2623,10 @@ export default function App() {
       locsUnsub();
       logsUnsub();
       leaveUnsub();
+      overtimeUnsub();
       allNotifsUnsub();
       pushUnsub();
-      if (isGestor) usersUnsub();
+      usersUnsub();
     };
   }, [isAuthenticated, currentUser, userRole]);
 
@@ -1527,39 +2641,7 @@ export default function App() {
     checkInit();
   }, []);
 
-  useEffect(() => {
-    let subscription: Location.LocationSubscription | null = null;
 
-    const startTracking = async () => {
-      if (!isClockedIn || !currentUser) return;
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
-
-      subscription = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.Balanced, timeInterval: 60000, distanceInterval: 10 },
-        (loc) => {
-          const newLog: UserLocationHistory = {
-            id: Math.random().toString(36).substr(2, 9),
-            keycloak_user_id: currentUser.keycloak_user_id,
-            latitude: loc.coords.latitude,
-            longitude: loc.coords.longitude,
-            accuracy: loc.coords.accuracy || 0,
-            source: 'gps',
-            timestamp: new Date().toISOString()
-          };
-          setUserLocationHistory(prev => [newLog, ...prev].slice(0, 500)); // Keeps last 500 records.
-        }
-      );
-    };
-
-    startTracking();
-
-    return () => {
-      if (subscription) {
-        subscription.remove();
-      }
-    };
-  }, [isClockedIn, currentUser]);
 
   const searchAddress = async () => {
     if (!newProject.addressSearch) return;
@@ -1607,9 +2689,13 @@ export default function App() {
   };
 
   const handleDeleteProject = async (projectId: string, projectName: string) => {
+    if (!isAdmin && !currentUser?.can_manage_projects) {
+      showNotification('Acesso Negado', 'Não tens permissão para remover obras.', 'error');
+      return;
+    }
     try {
       await deleteDoc(doc(db, 'work_locations', projectId));
-      addSystemNotification('Estaleiro Removido', `A obra "${projectName}" foi removida do sistema.`, 'all', 'warning');
+      addSystemNotification('Estaleiro Removido', `A obra "${projectName}" foi removida do sistema.`, 'managers', 'warning');
       showNotification('Sucesso', 'Estaleiro removido.', 'success');
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, 'work_locations');
@@ -1617,24 +2703,99 @@ export default function App() {
   };
 
   const handleDeleteEmployee = async (employeeId: string, employeeName: string) => {
-    if (!isAdmin) {
-      showNotification('Acesso Negado', 'Apenas administradores podem eliminar funcionários.', 'error');
+    // Only admins or people with manage_employees permission can delete
+    if (!isAdmin && !currentUser?.can_manage_employees) {
+      showNotification('Acesso Negado', 'Permissões insuficientes para eliminar funcionários.', 'error');
       return;
     }
+
+    // Safety check: Gestores cannot delete Admins
+    const targetEmp = employeesList.find(e => e.id === employeeId);
+    if (!isAdmin && (targetEmp?.role === 'admin' || targetEmp?.role === 'super_admin')) {
+      showNotification('Ação Bloqueada', 'Não tem permissão para eliminar um administrador.', 'error');
+      return;
+    }
+
     try {
       await deleteDoc(doc(db, 'users', employeeId));
-      addSystemNotification('Equipa Reduzida', `${employeeName} foi removido da equipa.`, 'all', 'warning');
+      addSystemNotification('Equipa Reduzida', `${employeeName} foi removido da equipa.`, 'managers', 'warning');
       showNotification('Sucesso', 'Funcionário removido.', 'success');
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, 'users');
     }
   };
 
+  const handleUpdatePassword = async (pwd: string) => {
+    if (!currentUser) {
+      console.log("App: handleUpdatePassword - no currentUser");
+      return;
+    }
+
+    console.log(`App: handleUpdatePassword started for UID: ${currentUser.id}`);
+    try {
+      const url = getApiUrl('/api/update-password');
+      console.log(`App: Fetching password update from: ${url}`);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: currentUser.id,
+          newPassword: pwd,
+          email: currentUser.email,
+          name: currentUser.name
+        })
+      });
+
+      console.log(`App: Password update response status: ${response.status}`);
+      let data;
+      const contentType = response.headers.get("content-type");
+
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        data = await response.json();
+        console.log("App: Password update response JSON:", data);
+      } else {
+        const text = await response.text();
+        console.log("App: Password update response text (non-JSON):", text);
+
+        if (response.status === 404) {
+          console.warn('Backend returned 404 for password update. This usually means the server.ts is out of date or not correctly reachable.');
+          throw new Error("O endpoint de atualização não foi encontrado no servidor (404). Por favor, verifique se o backend está na versão mais recente.");
+        }
+        throw new Error(text || `Erro do servidor (${response.status})`);
+      }
+
+      if (!response.ok) {
+        throw new Error(data?.error || `Falha ao atualizar password (${response.status})`);
+      }
+
+      showNotification('Sucesso', 'Palavra-passe atualizada com sucesso.', 'success');
+      console.log("App: Password update successful");
+    } catch (err: any) {
+      console.error('App: Password update error:', err);
+      // We throw to the modal so it can show the alert
+      throw err;
+    }
+  };
+
   const handleAddProject = async () => {
+    if (!isGestor) {
+      showNotification('Acesso Negado', 'Não tens permissão para adicionar obras.', 'error');
+      return;
+    }
+
     if (!newProject.name || !newProject.latitude || !newProject.longitude || !newProject.radius_meters) {
       showNotification('Aviso', 'Preencha os dados obrigatórios da obra.', 'warning');
       return;
     }
+
+    // Validação de nomes duplicados
+    const nameExists = workLocations.some(loc => loc.name.toLowerCase().trim() === newProject.name.toLowerCase().trim());
+    if (nameExists) {
+      showNotification('Nome Duplicado', 'Já existe uma obra com este nome.', 'error');
+      return;
+    }
+
     const lat = parseFloat(newProject.latitude);
     const lon = parseFloat(newProject.longitude);
     const rad = parseInt(newProject.radius_meters) || 500;
@@ -1656,7 +2817,9 @@ export default function App() {
         progress: 0,
         status: 'active',
         image: REALISTIC_IMAGES[Math.floor(Math.random() * REALISTIC_IMAGES.length)],
-        themeColor: '#00A3FF'
+        themeColor: '#00A3FF',
+        start_date: newProject.start_date,
+        end_date: newProject.end_date
       };
 
       const docRef = await addDoc(collection(db, 'work_locations'), newProj);
@@ -1666,19 +2829,71 @@ export default function App() {
         title: 'Novo Estaleiro Registado',
         message: `O estaleiro "${newProject.name}" foi adicionado ao sistema por ${currentUser?.name || 'Administrador'}.`,
         type: 'success',
-        app_user_id: 'all' // Public notification
+        app_user_id: 'managers' // Manager notification
       });
 
       setShowProjectForm(false);
-      setNewProject({ name: '', addressSearch: '', latitude: '', longitude: '', radius_meters: '500' });
+      setNewProject({ name: '', addressSearch: '', latitude: '', longitude: '', radius_meters: '500', start_date: format(new Date(), 'yyyy-MM-dd'), end_date: '' });
+      setEditingProjectId(null);
       showNotification('Sucesso', 'Obra registada com sucesso.', 'success');
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, 'work_locations');
     }
   };
 
+  const handleUpdateProject = async () => {
+    if (!isGestor) {
+      showNotification('Acesso Negado', 'Não tens permissão para editar obras.', 'error');
+      return;
+    }
+
+    if (!editingProjectId) return;
+
+    if (!newProject.name || !newProject.latitude || !newProject.longitude || !newProject.radius_meters) {
+      showNotification('Aviso', 'Preencha os dados obrigatórios da obra.', 'warning');
+      return;
+    }
+
+    const lat = parseFloat(newProject.latitude);
+    const lon = parseFloat(newProject.longitude);
+    const rad = parseInt(newProject.radius_meters) || 500;
+
+    if (isNaN(lat) || isNaN(lon)) {
+      showNotification('Aviso', 'Latitude ou Longitude inválida.', 'warning');
+      return;
+    }
+
+    try {
+      await updateDoc(doc(db, 'work_locations', editingProjectId), {
+        updated_at: new Date().toISOString(),
+        name: newProject.name,
+        latitude: lat,
+        longitude: lon,
+        radius_meters: rad,
+        start_date: newProject.start_date,
+        end_date: newProject.end_date
+      });
+
+      showNotification('Sucesso', 'Obra atualizada com sucesso!', 'success');
+      setNewProject({ name: '', addressSearch: '', latitude: '', longitude: '', radius_meters: '500', start_date: format(new Date(), 'yyyy-MM-dd'), end_date: '' });
+      setShowProjectForm(false);
+      setEditingProjectId(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, 'work_locations');
+    }
+  };
+
+  const generatePassword = () => {
+    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let pwd = "";
+    for (let i = 0; i < 8; i++) {
+      pwd += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return pwd;
+  };
+
   const handleAddEmployee = async () => {
-    if (!isAdmin) {
+    if (!isAdmin && !currentUser?.can_manage_employees) {
       showNotification('Acesso Negado', 'Permissões insuficientes para adicionar funcionários.', 'error');
       return;
     }
@@ -1688,94 +2903,387 @@ export default function App() {
     }
 
     try {
-      const newEmp: any = {
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        keycloak_user_id: 'pending-' + Math.random().toString(36).substr(2, 5),
-        active: true,
-        email: newEmployee.email.toLowerCase().trim(),
-        name: newEmployee.name,
-        role: newEmployee.role as AppRole,
-      };
+      showNotification('Processando...', 'Criando conta e enviando email...', 'success');
+      const password = generatePassword();
 
-      if (newEmployee.location_id) {
-        newEmp.location_id = newEmployee.location_id;
+      const registerUrl = getApiUrl('/api/register-employee');
+      console.log('Fetching:', registerUrl);
+
+      const response = await fetch(registerUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({
+          name: newEmployee.name,
+          email: newEmployee.email.toLowerCase().trim(),
+          role: newEmployee.role || 'colaborador',
+          location_id: newEmployee.location_id || null,
+          password: password
+        }),
+      }).catch(err => {
+        console.error('Fetch error:', err);
+        const msg = `Falha de rede: Não foi possível contactar o servidor em ${registerUrl}. Verifique se o backend está a correr na porta 3000 e se é acessível do seu dispositivo.`;
+        showNotification('Erro de Ligação', msg, 'error');
+        throw new Error(msg);
+      });
+
+      let result;
+      const responseText = await response.text();
+
+      // Check for Google Identity Proxy or Cloud Run error screens
+      if (responseText.includes('<!doctype html>') || responseText.includes('<html')) {
+        let errorMsg = 'O servidor retornou HTML em vez de JSON.';
+
+        if (responseText.includes('accounts.google.com') || responseText.includes('Sign in')) {
+          errorMsg = 'Bloqueio de Autenticação (Google Identity Proxy). O seu dispositivo não consegue aceder ao Backend da Cloud sem login prévio no browser. Recomendamos usar o IP local do seu computador se estiver a testar via Metro/Expo Go.';
+        } else if (responseText.includes('Cookie check')) {
+          errorMsg = 'Erro de Cookies/Sessão no Proxy da Cloud. Tente usar o IP local do seu computador no telemóvel.';
+        }
+
+        console.error('HTML Response detected:', responseText.substring(0, 500));
+        throw new Error(errorMsg);
       }
 
-      await addDoc(collection(db, 'users'), newEmp);
+      try {
+        result = JSON.parse(responseText);
+      } catch (e) {
+        console.error('Failed to parse JSON response. Response text:', responseText.substring(0, 500));
+        throw new Error(`Resposta inválida do servidor. Verifique a configuração do API URL.`);
+      }
+
+      if (!response.ok) {
+        throw new Error(result.error || 'Erro ao registrar funcionário');
+      }
 
       // Notify about new employee
       await addNotification({
         title: 'Novo Funcionário',
         message: `${newEmployee.name} foi adicionado à equipa como ${newEmployee.role}.`,
         type: 'info',
-        app_user_id: 'all'
+        app_user_id: 'managers'
       });
 
       setShowEmployeeForm(false);
       setNewEmployee({ name: '', email: '', role: 'colaborador', startTime: '08:00', endTime: '17:00' as any, location_id: '' });
-      showNotification('Funcionário Adicionado', `O funcionário ${newEmployee.name} foi registado.`, 'success');
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'users');
+      showNotification('Sucesso', `Funcionário ${newEmployee.name} registado com sucesso. As credenciais foram enviadas por e-mail.`, 'success');
+    } catch (error: any) {
+      console.error(error);
+      showNotification('Erro', error.message || 'Não foi possível registar o funcionário.', 'error');
     }
   };
 
-  const confirmPunch = async (type: 'check_in' | 'check_out', coords: { latitude: number, longitude: number }, locationName: string) => {
+  const handleUpdateUser = async (uid: string, data: Partial<AppUser>) => {
+    // Only admins or people with manage_employees permission can update others
+    if (!isAdmin && !currentUser?.can_manage_employees && uid !== currentUser?.id) {
+      showNotification('Acesso Negado', 'Não tem permissão para alterar outros perfis.', 'error');
+      return;
+    }
+
+    // Safety check: Gestores cannot modify Admins
+    const targetEmp = employeesList.find(e => e.id === uid);
+    if (!isAdmin && (targetEmp?.role === 'admin' || targetEmp?.role === 'super_admin')) {
+      showNotification('Ação Bloqueada', 'Não tem permissão para alterar dados de um administrador.', 'error');
+      return;
+    }
+
+    // Role/Permission guard: only Admins can change roles or permissions
+    const isChangingPerms = data.role !== undefined ||
+      data.can_view_all_locations !== undefined ||
+      data.can_view_users !== undefined ||
+      data.can_manage_projects !== undefined ||
+      data.can_manage_employees !== undefined;
+
+    if (!isAdmin && isChangingPerms) {
+      showNotification('Ação Bloqueada', 'Apenas administradores podem gerir cargos e permissões.', 'error');
+      return;
+    }
+
+    try {
+      await updateDoc(doc(db, 'users', uid), {
+        ...data,
+        updated_at: new Date().toISOString()
+      });
+      showNotification('Sucesso', 'Utilizador atualizado com sucesso.', 'success');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, 'users');
+    }
+  };
+
+  const confirmPunch = useCallback(async (type: 'check_in' | 'check_out' | 'lunch_start' | 'lunch_end', coords: { latitude: number, longitude: number }, locationName: string) => {
+    if (!currentUser) return;
+
+    // Check if user is active
+    if (currentUser.active === false) {
+      showNotification('Conta Inativa', 'A sua conta está desativada. Contacte a administração.', 'error');
+      return;
+    }
+
+    // Check if user has an assigned location
+    if (!currentUser.location_id) {
+      showNotification('Obra não Atribuída', 'Não tem uma obra atribuída. Contacte o seu gestor.', 'error');
+      setIsFloatingMenuOpen(false);
+      setShowPunchConfirmation(null);
+      return;
+    }
+
+    // Cooldown check: prevent multiple punches within 2 minutes
+    const myLogs = timeLogs.filter(l => l.app_user_id === currentUser.id);
+    if (myLogs.length > 0) {
+      const lastPunchTime = new Date(myLogs[0].timestamp).getTime();
+      const now = new Date().getTime();
+      const diffMinutes = (now - lastPunchTime) / (1000 * 60);
+      if (diffMinutes < 2) {
+        showNotification('Operação Bloqueada', `Deve aguardar pelo menos 2 minutos entre registos.`, 'warning');
+        setIsFloatingMenuOpen(false);
+        setShowPunchConfirmation(null);
+        return;
+      }
+    }
+
+    // Strict Sequence and Daily Limits
+    const todayLogs = myLogs.filter(l => isSameDay(new Date(l.timestamp), new Date()));
+    const hasCheckIn = todayLogs.some(l => l.type === 'check_in');
+    const hasCheckOut = todayLogs.some(l => l.type === 'check_out');
+    const hasLunchStart = todayLogs.some(l => l.type === 'lunch_start');
+    const hasLunchEnd = todayLogs.some(l => l.type === 'lunch_end');
+
+    if (type === 'check_in') {
+      if (hasCheckIn) {
+        showNotification('Operação Bloqueada', 'Já realizou a entrada hoje.', 'warning');
+        return;
+      }
+    } else {
+      // All other types require a check-in today
+      if (!hasCheckIn) {
+        showNotification('Operação Bloqueada', 'Deve realizar a entrada primeiro.', 'warning');
+        return;
+      }
+
+      if (type === 'lunch_start') {
+        if (hasLunchStart) {
+          showNotification('Operação Bloqueada', 'Já registou o início do almoço hoje.', 'warning');
+          return;
+        }
+        if (hasCheckOut) {
+          showNotification('Operação Bloqueada', 'Já realizou o check-out hoje.', 'warning');
+          return;
+        }
+      } else if (type === 'lunch_end') {
+        if (!hasLunchStart) {
+          showNotification('Operação Bloqueada', 'Deve registar o início do almoço primeiro.', 'warning');
+          return;
+        }
+        if (hasLunchEnd) {
+          showNotification('Operação Bloqueada', 'Já registou o fim do almoço hoje.', 'warning');
+          return;
+        }
+      } else if (type === 'check_out') {
+        if (hasCheckOut) {
+          showNotification('Operação Bloqueada', 'Já realizou a saída hoje.', 'warning');
+          return;
+        }
+        if (hasLunchStart && !hasLunchEnd) {
+          showNotification('Operação Bloqueada', 'Deve terminar o almoço antes de sair.', 'warning');
+          return;
+        }
+      }
+    }
+
     // Find nearest work site to associate with the log
-    let nearestLocId = 'loc-unknown';
+    let nearestLoc: WorkLocation | null = null;
     let minDistance = Infinity;
 
-    workLocations.forEach(loc => {
+    const permittedLocations = workLocations.filter(loc => loc.id === currentUser?.location_id);
+    permittedLocations.forEach(loc => {
       const dist = getDistanceFromLatLonInM(coords.latitude, coords.longitude, loc.latitude, loc.longitude);
       if (dist < minDistance) {
         minDistance = dist;
-        nearestLocId = loc.id;
+        nearestLoc = loc;
       }
     });
+
+    if (!nearestLoc || minDistance > nearestLoc.radius_meters) {
+      await addNotification({
+        title: 'Tentativa Fora do Raio',
+        message: `${currentUser?.name} tentou um ${type} fora da zona permitida (a ${Math.round(minDistance)}m de ${nearestLoc?.name || 'qualquer obra'}).`,
+        type: 'warning',
+        app_user_id: 'managers'
+      });
+      showNotification('Operação Bloqueada', `Está a ${Math.round(minDistance)}m da obra. Aproxime-se para registar o ponto.`, 'error');
+      setIsFloatingMenuOpen(false);
+      setShowPunchConfirmation(null);
+      return;
+    }
 
     try {
       const record: Omit<TimeLog, 'id'> = {
         created_at: new Date().toISOString(),
-        app_user_id: currentUser?.id || 'usr-x',
-        work_location_id: nearestLocId,
+        app_user_id: currentUser.id,
+        work_location_id: nearestLoc.id,
         device_id: 'dev-' + Math.random().toString(36).substr(2, 5),
         timestamp: new Date().toISOString(),
         type,
         latitude: coords.latitude,
         longitude: coords.longitude,
-        valid: minDistance <= 500, // Valid if within 500m of a work site
+        valid: true,
         employee_name: currentUser?.name || 'Funcionário',
         location_name: locationName
       };
 
       await addDoc(collection(db, 'time_logs'), record);
 
-      // Notify about punch event (for managers/system audit)
       await addNotification({
-        title: type === 'check_in' ? 'Novo Check-in' : 'Novo Check-out',
-        message: `${currentUser?.name} registou ${type === 'check_in' ? 'entrada' : 'saída'} em ${locationName}.`,
+        title: type === 'check_in' ? 'Novo Check-in' : type === 'check_out' ? 'Novo Check-out' : type === 'lunch_start' ? 'Pausa Almoço' : 'Fim Almoço',
+        message: `${currentUser?.name} registou ${type} em ${locationName}.`,
         type: 'info',
-        app_user_id: 'all' // In a real app, only managers might see this, but for the request we notify all changes.
+        app_user_id: 'managers'
       });
 
-      // Update isClockedIn locally for faster response, though onSnapshot will also handle it
-      setIsClockedIn(type === 'check_in');
+      if (type === 'check_in' || type === 'lunch_end') {
+        setIsClockedIn(true);
+        if (type === 'lunch_end') setIsOnLunch(false);
+      } else if (type === 'check_out') {
+        setIsClockedIn(false);
+        setIsOnLunch(false);
+      } else if (type === 'lunch_start') {
+        setIsOnLunch(true);
+      }
 
       setIsFloatingMenuOpen(false);
       setShowPunchConfirmation(null);
 
-      // Success notification
-      addNotification({
-        title: type === 'check_in' ? 'Entrada Confirmada' : 'Saída Confirmada',
-        message: `Registo efetuado com sucesso em ${locationName}.`,
-        type: 'success'
-      });
+      showNotification(
+        type === 'check_in' ? 'Entrada Confirmada' : type === 'check_out' ? 'Saída Confirmada' : type === 'lunch_start' ? 'Bom Almoço!' : 'Bom Trabalho!',
+        `Registo de ${type} efetuado com sucesso.`,
+        'success'
+      );
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, 'time_logs');
     }
+  }, [currentUser, timeLogs, workLocations, setIsClockedIn, setIsOnLunch, setIsFloatingMenuOpen, setShowPunchConfirmation]);
+
+  const handleRequestOvertime = async (targetUserId: string, targetUserName: string, date: string, hours: number, reason: string) => {
+    if (!currentUser) return;
+    try {
+      const newRequest = {
+        user_id: targetUserId,
+        user_name: targetUserName,
+        requested_by_id: currentUser.id,
+        requested_by_name: currentUser.name || currentUser.email,
+        date,
+        hours,
+        reason,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      };
+      await addDoc(collection(db, 'overtime_requests'), newRequest);
+
+      // Notify employee directly
+      await addNotification({
+        title: 'Pedido de Hora Extra',
+        message: `${currentUser.name || currentUser.email} pede que faças ${hours}h extras no dia ${date}. Aceitas?`,
+        type: 'warning',
+        app_user_id: targetUserId
+      });
+
+      showNotification('Sucesso', 'Pedido de hora extra enviado ao funcionário.', 'success');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'overtime_requests');
+    }
   };
 
-  const handleGPSCheckInOut = async () => {
+  const handleProcessOvertime = async (requestId: string, approve: boolean) => {
+    if (!currentUser) return;
+    try {
+      const request = overtimeRequests.find(r => r.id === requestId);
+      if (!request) return;
+
+      const status = approve ? 'approved' : 'rejected';
+      await updateDoc(doc(db, 'overtime_requests', requestId), {
+        status,
+        updated_at: new Date().toISOString(),
+        approver_id: currentUser.id
+      });
+
+      await addNotification({
+        title: approve ? 'Hora Extra Aceite' : 'Hora Extra Recusada',
+        message: `O funcionário ${request.user_name} ${approve ? 'aceitou' : 'recusou'} fazer ${request.hours}h extra no dia ${request.date}.`,
+        type: approve ? 'success' : 'warning',
+        app_user_id: request.requested_by_id || 'all'
+      });
+
+      showNotification('Sucesso', `Pedido de hora extra ${approve ? 'aceite' : 'recusado'}.`, 'success');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'overtime_requests');
+    }
+  };
+
+  const handleLunchToggle = useCallback(async () => {
+    if (!isAuthenticated || !currentUser) return;
+
+    if (!currentUser.location_id) {
+      showNotification('Obra não Atribuída', 'Não tem uma obra atribuída para registar pausa.', 'warning');
+      return;
+    }
+
+    if (!isClockedIn) {
+      showNotification('Operação Inválida', 'Você precisa estar em turno para iniciar uma pausa.', 'warning');
+      return;
+    }
+
+    setIsCapturingLocation(true);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        showNotification('Permissão Necessária', 'Precisamos de acesso ao GPS para validar a pausa.', 'error');
+        return;
+      }
+
+      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const { latitude, longitude } = location.coords;
+
+      // Anti-fraud: Verify if user is near a site or if policy requires it
+      // For now we check if they are near ANY valid site if it's start of lunch
+      let nearestLoc: WorkLocation | null = null;
+      let minDistance = Infinity;
+
+      const permittedLocations = workLocations.filter(loc => loc.id === currentUser?.location_id);
+      permittedLocations.forEach(loc => {
+        const d = getDistanceFromLatLonInM(latitude, longitude, loc.latitude, loc.longitude);
+        if (d < minDistance) {
+          minDistance = d;
+          nearestLoc = loc;
+        }
+      });
+
+      const type = isOnLunch ? 'lunch_end' : 'lunch_start';
+      const locationName = nearestLoc ? nearestLoc.name : 'Local Desconhecido';
+
+      await confirmPunch(type, { latitude, longitude }, locationName);
+
+    } catch (error) {
+      console.error('Lunch toggle error:', error);
+      showNotification('Erro GPS', 'Não foi possível capturar sua localização.', 'error');
+    } finally {
+      setIsCapturingLocation(false);
+    }
+  }, [isAuthenticated, currentUser, isClockedIn, isOnLunch, workLocations, confirmPunch]);
+
+  const handleGPSCheckInOut = useCallback(async () => {
+    if (!isAuthenticated || !currentUser) return;
+
+    if (!currentUser.location_id) {
+      showNotification('Obra não Atribuída', 'Não tem uma obra atribuída para registar o ponto.', 'warning');
+      return;
+    }
+
+    if (isClockedIn && isOnLunch) {
+      showNotification('Operação Bloqueada', 'Deve finalizar sua pausa de almoço antes de registrar a saída.', 'warning');
+      return;
+    }
+
     setIsCapturingLocation(true);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -1785,7 +3293,8 @@ export default function App() {
         return;
       }
 
-      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest });
+      // Use Balanced accuracy for speed unless it's a critical punch confirmation
+      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
 
       let locationName = 'Localização GPS';
       try {
@@ -1811,7 +3320,7 @@ export default function App() {
     } finally {
       setIsCapturingLocation(false);
     }
-  };
+  }, [isAuthenticated, currentUser, isClockedIn, isOnLunch, confirmPunch]);
 
   const pickImage = async () => {
     try {
@@ -1859,8 +3368,24 @@ export default function App() {
   };
 
   const handlePersonalizedLogin = async () => {
-    if (!loginForm.matricula || !loginForm.password) {
-      showNotification('Campos Obrigatórios', 'Por favor, preencha o E-mail e a Palavra-passe.', 'warning');
+    setLoginError(null);
+    setFieldErrors({});
+
+    let hasErrors = false;
+    const errors: { matricula?: string; password?: string } = {};
+
+    if (!loginForm.matricula) {
+      errors.matricula = 'O e-mail é obrigatório';
+      hasErrors = true;
+    }
+
+    if (!loginForm.password) {
+      errors.password = 'A palavra-passe é obrigatória';
+      hasErrors = true;
+    }
+
+    if (hasErrors) {
+      setFieldErrors(errors);
       return;
     }
 
@@ -1869,40 +3394,19 @@ export default function App() {
     try {
       const emailLower = loginForm.matricula.toLowerCase().trim();
 
-      // Try Firestore check first
-      try {
-        const usersRef = collection(db, 'users');
-        const q = query(usersRef, where('email', '==', emailLower));
-        const snap = await getDocs(q);
+      // Usar Autenticação Real do Firebase
+      await signInWithEmailAndPassword(auth, emailLower, loginForm.password);
 
-        if (!snap.empty) {
-          const userDoc = snap.docs[0];
-          const userData = userDoc.data();
-
-          if (userData.password === loginForm.password) {
-            setIsAuthenticated(true);
-            setCurrentUser({ ...userData, id: userDoc.id } as AppUser);
-            setUserRole(userData.role || 'colaborador');
-            return;
-          }
-        }
-      } catch (firestoreError) {
-        console.log('Firestore auth check failed, trying local fallback:', firestoreError);
-      }
-
-      // Local fallback for demo stability
-      const defaultUser = DEFAULT_USERS.find(u => u.email === emailLower);
-      if (defaultUser && loginForm.password === defaultUser.password) {
-        setIsAuthenticated(true);
-        setCurrentUser(defaultUser);
-        setUserRole(defaultUser.role || 'colaborador');
-        return;
-      }
-
-      showNotification('Falha na Autenticação', 'E-mail ou Palavra-passe incorretos.', 'error');
+      // O listener onAuthStateChanged tratará de definir o estado do utilizador
     } catch (error: any) {
-      console.error('Personalized login error:', error);
-      showNotification('Erro de Sistema', 'Ocorreu um erro ao processar a autenticação.', 'error');
+      console.error('Login error:', error);
+      if (error.code === 'auth/operation-not-allowed') {
+        setLoginError('O login com e-mail/senha está desativado no Firebase Console. Ative em Autenticação -> Método de Login.');
+      } else if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
+        setLoginError('E-mail ou Palavra-passe incorretos.');
+      } else {
+        setLoginError(error.message || 'Falha na autenticação. Verifique os seus dados.');
+      }
     } finally {
       setIsCapturingLocation(false);
     }
@@ -2026,6 +3530,32 @@ export default function App() {
                 <Text style={styles.primaryBtnText}>{currentSlide < slides.length - 1 ? "Próximo" : "Começar"}</Text>
               </TouchableOpacity>
             </View>
+            <Modal transparent visible={notification.visible} animationType="none" onRequestClose={closeNotification}>
+              <MotiView
+                from={{ opacity: 0, scale: 0.9, translateY: 50 }}
+                animate={{ opacity: 1, scale: 1, translateY: 0 }}
+                exit={{ opacity: 0, scale: 0.9, translateY: 50 }}
+                style={styles.notifOverlay}
+              >
+                <View style={styles.customNotifCard}>
+                  <View style={[styles.customNotifIconContainer, { backgroundColor: notification.type === 'success' ? '#10b981' : notification.type === 'error' ? '#ef4444' : '#f59e0b' }]}>
+                    {notification.type === 'success' ? <CheckCircle2 size={32} color="#fff" /> :
+                      notification.type === 'error' ? <XCircle size={32} color="#fff" /> :
+                        <AlertTriangle size={32} color="#fff" />}
+                  </View>
+
+                  <Text style={styles.customNotifTitle}>{notification.title}</Text>
+                  <Text style={styles.customNotifMessage}>{notification.message}</Text>
+
+                  <TouchableOpacity
+                    style={[styles.customNotifButton, { backgroundColor: notification.type === 'success' ? '#10b981' : notification.type === 'error' ? '#ef4444' : '#f59e0b' }]}
+                    onPress={closeNotification}
+                  >
+                    <Text style={styles.customNotifButtonText}>ENTENDIDO</Text>
+                  </TouchableOpacity>
+                </View>
+              </MotiView>
+            </Modal>
           </NativeSafeAreaView>
         </GestureHandlerRootView>
       </SafeAreaProvider>
@@ -2037,8 +3567,7 @@ export default function App() {
       <SafeAreaProvider>
         <ErrorModal />
         <GestureHandlerRootView style={{ flex: 1 }}>
-          <ImageBackground source={{ uri: '/login-bg.png' }} style={styles.container} resizeMode="cover">
-            <View style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(10, 16, 28, 0.85)' }]} />
+          <View style={[styles.container, { backgroundColor: '#14233c' }]}>
             <KeyboardAvoidingView
               behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
               style={{ flex: 1 }}
@@ -2065,34 +3594,64 @@ export default function App() {
                   <View style={styles.loginFormContainer}>
                     <View style={styles.inputGroup}>
                       <Text style={styles.fieldLabel}>E-MAIL</Text>
-                      <View style={[styles.fieldWrapper, { backgroundColor: 'rgba(255,255,255,0.1)', borderColor: 'rgba(255,255,255,0.2)' }]}>
-                        <User size={18} color="#00aeef" />
+                      <View style={[styles.fieldWrapper, {
+                        backgroundColor: 'rgba(255,255,255,0.1)',
+                        borderColor: fieldErrors.matricula ? '#ef4444' : 'rgba(255,255,255,0.2)',
+                        borderWidth: fieldErrors.matricula ? 1 : 1
+                      }]}>
+                        <User size={18} color={fieldErrors.matricula ? '#ef4444' : '#00aeef'} />
                         <TextInput
                           placeholder="Ex: ricardo@objetivo.pt"
                           placeholderTextColor="rgba(255,255,255,0.5)"
                           style={styles.fieldInput}
                           value={loginForm.matricula}
-                          onChangeText={(v) => setLoginForm({ ...loginForm, matricula: v })}
+                          onChangeText={(v) => {
+                            setLoginForm({ ...loginForm, matricula: v });
+                            if (fieldErrors.matricula) setFieldErrors({ ...fieldErrors, matricula: undefined });
+                          }}
                           keyboardType="email-address"
                           autoCapitalize="none"
                         />
                       </View>
+                      {fieldErrors.matricula && (
+                        <Text style={{ color: '#ef4444', fontSize: 11, marginTop: 4, marginLeft: 4 }}>{fieldErrors.matricula}</Text>
+                      )}
                     </View>
 
                     <View style={styles.inputGroup}>
                       <Text style={styles.fieldLabel}>PALAVRA-PASSE</Text>
-                      <View style={[styles.fieldWrapper, { backgroundColor: 'rgba(255,255,255,0.1)', borderColor: 'rgba(255,255,255,0.2)' }]}>
-                        <Lock size={18} color="#00aeef" />
+                      <View style={[styles.fieldWrapper, {
+                        backgroundColor: 'rgba(255,255,255,0.1)',
+                        borderColor: fieldErrors.password ? '#ef4444' : 'rgba(255,255,255,0.2)',
+                        borderWidth: fieldErrors.password ? 1 : 1
+                      }]}>
+                        <Lock size={18} color={fieldErrors.password ? '#ef4444' : '#00aeef'} />
                         <TextInput
                           placeholder="••••••••"
                           placeholderTextColor="rgba(255,255,255,0.5)"
-                          secureTextEntry
                           style={styles.fieldInput}
                           value={loginForm.password}
-                          onChangeText={(v) => setLoginForm({ ...loginForm, password: v })}
+                          onChangeText={(v) => {
+                            setLoginForm({ ...loginForm, password: v });
+                            if (fieldErrors.password) setFieldErrors({ ...fieldErrors, password: undefined });
+                          }}
+                          secureTextEntry
                         />
                       </View>
+                      {fieldErrors.password && (
+                        <Text style={{ color: '#ef4444', fontSize: 11, marginTop: 4, marginLeft: 4 }}>{fieldErrors.password}</Text>
+                      )}
                     </View>
+
+                    {loginError && (
+                      <MotiView
+                        from={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        style={{ marginBottom: 16 }}
+                      >
+                        <Text style={{ color: '#ef4444', fontSize: 13, fontWeight: '500' }}>{loginError}</Text>
+                      </MotiView>
+                    )}
 
                     <TouchableOpacity
                       style={styles.brandButton}
@@ -2133,18 +3692,54 @@ export default function App() {
                       <Text style={styles.loginInfoText}>Ambiente seguro e monitorizado</Text>
                     </View>
 
-                    <View style={{ marginTop: 24, padding: 12, backgroundColor: 'rgba(0,163,255,0.05)', borderRadius: 12, borderWidth: 1, borderColor: 'rgba(0,163,255,0.1)' }}>
-                      <Text style={{ fontSize: 10, fontWeight: '900', color: '#00aeef', marginBottom: 4 }}>DEMO CREDENTIALS</Text>
-                      <Text style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)' }}>Super: superadmin@objetivo.pt / admin123</Text>
-                      <Text style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)' }}>Admin: admin@objetivo.pt / admin123</Text>
-                      <Text style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)' }}>Gestor: gestor@objetivo.pt / gestor123</Text>
-                      <Text style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)' }}>Colab: colaborador@objetivo.pt / colab123</Text>
-                    </View>
+                    <TouchableOpacity
+                      onPress={() => setShowServerConfig(true)}
+                      style={{ marginTop: 32, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 8 }}
+                    >
+                      <Settings2 size={16} color="rgba(255,255,255,0.3)" />
+                      <Text style={{ color: 'rgba(255,255,255,0.3)', fontSize: 11, fontWeight: '700' }}>CONFIGURAÇÕES DE SERVIDOR</Text>
+                    </TouchableOpacity>
+
+
                   </View>
                 </MotiView>
               </ScrollView>
             </KeyboardAvoidingView>
-          </ImageBackground>
+          </View>
+
+          <Modal transparent visible={notification.visible} animationType="none" onRequestClose={closeNotification}>
+            <MotiView
+              from={{ opacity: 0, scale: 0.9, translateY: 50 }}
+              animate={{ opacity: 1, scale: 1, translateY: 0 }}
+              exit={{ opacity: 0, scale: 0.9, translateY: 50 }}
+              style={styles.notifOverlay}
+            >
+              <View style={styles.customNotifCard}>
+                <View style={[styles.customNotifIconContainer, { backgroundColor: notification.type === 'success' ? '#10b981' : notification.type === 'error' ? '#ef4444' : '#f59e0b' }]}>
+                  {notification.type === 'success' ? <CheckCircle2 size={32} color="#fff" /> :
+                    notification.type === 'error' ? <XCircle size={32} color="#fff" /> :
+                      <AlertTriangle size={32} color="#fff" />}
+                </View>
+
+                <Text style={styles.customNotifTitle}>{notification.title}</Text>
+                <Text style={styles.customNotifMessage}>{notification.message}</Text>
+
+                <TouchableOpacity
+                  style={[styles.customNotifButton, { backgroundColor: notification.type === 'success' ? '#10b981' : notification.type === 'error' ? '#ef4444' : '#f59e0b' }]}
+                  onPress={closeNotification}
+                >
+                  <Text style={styles.customNotifButtonText}>ENTENDIDO</Text>
+                </TouchableOpacity>
+              </View>
+            </MotiView>
+          </Modal>
+          <ServerConfigModal
+            visible={showServerConfig}
+            onClose={() => setShowServerConfig(false)}
+            apiUrl={customApiUrl}
+            onSave={setCustomApiUrl}
+            isDarkMode={isDarkMode}
+          />
         </GestureHandlerRootView>
       </SafeAreaProvider>
     );
@@ -2302,10 +3897,53 @@ export default function App() {
                           {isClockedIn ? 'Turno a decorrer' : 'Fora de turno'}
                         </Text>
                       </View>
-                      <TouchableOpacity style={[styles.bentoActionBtn, { backgroundColor: isClockedIn ? '#f0cc4a' : '#00A3FF' }]} onPress={handleGPSCheckInOut}>
-                        <Text style={[styles.bentoActionText, { color: isClockedIn ? '#14233c' : 'white' }]}>{isClockedIn ? 'SAÍDA' : 'ENTRADA'}</Text>
-                        <ChevronRight size={14} color={isClockedIn ? '#14233c' : 'white'} />
-                      </TouchableOpacity>
+                      <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+                        {(() => {
+                          const { hasCheckIn, hasCheckOut, hasLunchStart, hasLunchEnd } = todayStats;
+
+                          const checkInText = hasCheckIn ? 'JÁ ENTROU' : 'ENTRADA';
+                          const checkOutText = hasCheckOut ? 'JÁ SAIU' : 'SAÍDA';
+                          const lunchText = hasLunchEnd ? 'ALMOÇO [X]' : (isOnLunch ? 'FIM PAUSA' : 'ALMOÇO');
+
+                          const hasLocation = !!currentUser?.location_id;
+                          const mainActionDisabled = !hasLocation || hasCheckOut || (isClockedIn ? (hasLunchStart && !hasLunchEnd) : hasCheckIn);
+                          const lunchActionDisabled = !hasLocation || hasLunchEnd || !isClockedIn || (isOnLunch ? false : hasLunchStart);
+
+                          return (
+                            <>
+                              <TouchableOpacity
+                                disabled={mainActionDisabled}
+                                style={[
+                                  styles.bentoActionBtn,
+                                  { flex: 1, backgroundColor: isClockedIn ? '#f0cc4a' : '#00A3FF', opacity: mainActionDisabled ? 0.3 : 1 }
+                                ]}
+                                onPress={handleGPSCheckInOut}
+                              >
+                                <Text style={[styles.bentoActionText, { color: isClockedIn ? '#14233c' : 'white' }]}>
+                                  {!hasLocation ? 'SEM OBRA' : (isClockedIn ? checkOutText : checkInText)}
+                                </Text>
+                                <ChevronRight size={14} color={isClockedIn ? '#14233c' : 'white'} />
+                              </TouchableOpacity>
+
+                              {isClockedIn && (
+                                <TouchableOpacity
+                                  disabled={lunchActionDisabled}
+                                  style={[
+                                    styles.bentoActionBtn,
+                                    { flex: 1, backgroundColor: isOnLunch ? '#ef4444' : '#10b981', opacity: lunchActionDisabled ? 0.3 : 1 }
+                                  ]}
+                                  onPress={handleLunchToggle}
+                                >
+                                  <Text style={[styles.bentoActionText, { color: 'white' }]}>
+                                    {!hasLocation ? 'BLOQUEADO' : lunchText}
+                                  </Text>
+                                  <Coffee size={14} color="white" />
+                                </TouchableOpacity>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </View>
                       <Text style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)', marginTop: 8, textAlign: 'center' }}>Registo GPS obrigatório</Text>
                     </View>
 
@@ -2314,14 +3952,30 @@ export default function App() {
                         <View style={styles.circularProgressContainer}>
                           <Svg width="80" height="80">
                             <SvgCircle cx="40" cy="40" r="35" stroke={isDarkMode ? '#334155' : '#f1f5f9'} strokeWidth="6" fill="none" />
-                            <SvgCircle cx="40" cy="40" r="35" stroke="#00A3FF" strokeWidth="6" fill="none" strokeDasharray="220" strokeDashoffset="55" strokeLinecap="round" />
+                            <SvgCircle
+                              cx="40" cy="40" r="35"
+                              stroke={isOnLunch ? '#ef4444' : (isClockedIn ? '#10b981' : '#00A3FF')}
+                              strokeWidth="6"
+                              fill="none"
+                              strokeDasharray="220"
+                              strokeDashoffset={isOnLunch ? 165 : 55}
+                              strokeLinecap="round"
+                            />
                           </Svg>
                           <View style={styles.circularCenter}>
-                            <Text style={[styles.circularVal, { color: isDarkMode ? 'white' : '#14233c' }]}>75%</Text>
+                            {isOnLunch ? (
+                              <Coffee size={24} color="#ef4444" />
+                            ) : (
+                              <Text style={[styles.circularVal, { color: isDarkMode ? 'white' : '#14233c' }]}>
+                                {isClockedIn ? 'ON' : '75%'}
+                              </Text>
+                            )}
                           </View>
                         </View>
                       </View>
-                      <Text style={[styles.bentoSub, { textAlign: 'center', color: isDarkMode ? '#64748B' : '#94A3B8' }]}>Meta Semanal</Text>
+                      <Text style={[styles.bentoSub, { textAlign: 'center', color: isDarkMode ? '#64748B' : '#94A3B8' }]}>
+                        {isOnLunch ? 'Em Pausa' : (isClockedIn ? 'Trabalhando' : 'Meta Semanal')}
+                      </Text>
                     </View>
                   </View>
 
@@ -2330,14 +3984,14 @@ export default function App() {
                     <MapView
                       style={{ flex: 1 }}
                       initialRegion={{
-                        latitude: workLocations[0]?.latitude || 38.7223,
-                        longitude: workLocations[0]?.longitude || -9.1393,
+                        latitude: visibleWorkLocations[0]?.latitude || 38.7223,
+                        longitude: visibleWorkLocations[0]?.longitude || -9.1393,
                         latitudeDelta: 0.12,
                         longitudeDelta: 0.12,
                       }}
                       customMapStyle={isDarkMode ? undefined : []} // In a real app we'd use a custom dark style JSON
                     >
-                      {workLocations.map(loc => (
+                      {visibleWorkLocations.map(loc => (
                         <Marker
                           key={loc.id}
                           coordinate={{ latitude: loc.latitude, longitude: loc.longitude }}
@@ -2353,6 +4007,23 @@ export default function App() {
                           </View>
                         </Marker>
                       ))}
+                      {employeesList.filter(emp => currentUser?.role === 'super_admin' || emp.role !== 'super_admin').map(emp => {
+                        if (!emp.last_location) return null;
+                        const empLogs = timeLogs.filter(l => l.app_user_id === emp.id).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                        const isClocked = empLogs.length > 0 && empLogs[0].type === 'check_in' && isSameDay(new Date(empLogs[0].timestamp), new Date());
+                        if (!isClocked) return null;
+
+                        return (
+                          <Marker coordinate={{ latitude: emp.last_location.latitude, longitude: emp.last_location.longitude }} key={`live-op-${emp.id}`}>
+                            <View style={{ alignItems: 'center' }}>
+                              <View style={{ backgroundColor: emp.last_location.out_of_bounds ? '#FE4A49' : '#10b981', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, marginBottom: 2 }}>
+                                <Text style={{ color: 'white', fontSize: 8, fontWeight: 'bold' }}>{emp.name?.substring(0, 10)}...</Text>
+                              </View>
+                              <View style={{ width: 14, height: 14, borderRadius: 7, backgroundColor: emp.last_location.out_of_bounds ? '#FE4A49' : '#10b981', borderWidth: 2, borderColor: 'white' }} />
+                            </View>
+                          </Marker>
+                        );
+                      })}
                     </MapView>
                     <View style={{ position: 'absolute', bottom: 12, left: 12, backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 }}>
                       <Text style={{ color: 'white', fontSize: 10, fontWeight: '800' }}>MAPA OPERACIONAL DE OBRAS</Text>
@@ -2366,7 +4037,17 @@ export default function App() {
                         <Text style={[styles.bentoMuted, { color: 'rgba(255,255,255,0.6)' }]}>RESUMO MENSAL</Text>
                         <Text style={[styles.bentoLarge, { fontSize: 24, fontWeight: '900', color: 'white', marginTop: -4, textTransform: 'capitalize' }]}>{format(new Date(), 'MMMM', { locale: ptBR })}</Text>
                       </View>
-                      <TouchableOpacity style={[styles.iconGhostBtn, { backgroundColor: 'rgba(255,255,255,0.1)' }]}>
+                      <TouchableOpacity
+                        style={[styles.iconGhostBtn, { backgroundColor: 'rgba(255,255,255,0.1)' }]}
+                        onPress={() => {
+                          if (!currentUser) return;
+                          if (isAdmin || isGestor) {
+                            handleExportGeneral();
+                          } else {
+                            handleExportIndividual(currentUser);
+                          }
+                        }}
+                      >
                         <Download size={18} color="white" />
                       </TouchableOpacity>
                     </View>
@@ -2391,7 +4072,7 @@ export default function App() {
                         <TrendingUp size={16} color="#00A3FF" />
                       </View>
                       <View style={{ gap: 20 }}>
-                        {workLocations.slice(0, 2).map(p => (
+                        {visibleWorkLocations.slice(0, 2).map(p => (
                           <TouchableOpacity key={p.id} onPress={() => setSelectedProjectForDetails(p)} activeOpacity={0.7}>
                             <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
                               <Text style={{ fontSize: 14, fontWeight: '900', color: 'white' }}>{p.name}</Text>
@@ -2428,7 +4109,7 @@ export default function App() {
                 <View style={{ gap: 20 }}>
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                     <Text style={styles.sectionTitle}>CENTRAL DE OBRAS</Text>
-                    {isGestor && (
+                    {(isAdmin || isGestor || currentUser?.can_manage_projects) && (
                       <TouchableOpacity
                         style={styles.headerActionBtn}
                         onPress={() => {
@@ -2445,13 +4126,13 @@ export default function App() {
                     <MapView
                       style={{ flex: 1 }}
                       initialRegion={{
-                        latitude: workLocations[0]?.latitude || 38.7223,
-                        longitude: workLocations[0]?.longitude || -9.1393,
+                        latitude: visibleWorkLocations[0]?.latitude || 38.7223,
+                        longitude: visibleWorkLocations[0]?.longitude || -9.1393,
                         latitudeDelta: 0.5,
                         longitudeDelta: 0.5,
                       }}
                     >
-                      {workLocations.map(loc => (
+                      {visibleWorkLocations.map(loc => (
                         <Marker
                           key={loc.id}
                           coordinate={{ latitude: loc.latitude, longitude: loc.longitude }}
@@ -2467,6 +4148,23 @@ export default function App() {
                           </View>
                         </Marker>
                       ))}
+                      {employeesList.filter(emp => currentUser?.role === 'super_admin' || emp.role !== 'super_admin').map(emp => {
+                        if (!emp.last_location) return null;
+                        const empLogs = timeLogs.filter(l => l.app_user_id === emp.id).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                        const isClocked = empLogs.length > 0 && empLogs[0].type === 'check_in' && isSameDay(new Date(empLogs[0].timestamp), new Date());
+                        if (!isClocked) return null;
+
+                        return (
+                          <Marker coordinate={{ latitude: emp.last_location.latitude, longitude: emp.last_location.longitude }} key={`live-${emp.id}`}>
+                            <View style={{ alignItems: 'center' }}>
+                              <View style={{ backgroundColor: emp.last_location.out_of_bounds ? '#FE4A49' : '#10b981', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, marginBottom: 2 }}>
+                                <Text style={{ color: 'white', fontSize: 8, fontWeight: 'bold' }}>{emp.name?.substring(0, 10)}...</Text>
+                              </View>
+                              <View style={{ width: 14, height: 14, borderRadius: 7, backgroundColor: emp.last_location.out_of_bounds ? '#FE4A49' : '#10b981', borderWidth: 2, borderColor: 'white' }} />
+                            </View>
+                          </Marker>
+                        );
+                      })}
                     </MapView>
                     <View style={{ position: 'absolute', bottom: 12, left: 12, backgroundColor: 'rgba(20,35,60,0.8)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 }}>
                       <Text style={{ color: 'white', fontSize: 10, fontWeight: '900' }}>VISTA GERAL DE ESTALEIROS</Text>
@@ -2480,8 +4178,8 @@ export default function App() {
                       style={{ backgroundColor: isDarkMode ? '#111111' : 'white', borderRadius: 24, padding: 24, marginBottom: 20, borderWidth: 1, borderColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#f1f5f9', shadowColor: '#000', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.1, shadowRadius: 20, elevation: 5 }}
                     >
                       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                        <Text style={{ fontSize: 20, fontWeight: '900', color: isDarkMode ? 'white' : '#14233c', letterSpacing: -0.5 }}>Configurar Novo Estaleiro</Text>
-                        <TouchableOpacity onPress={() => setShowProjectForm(false)} style={{ padding: 4 }}>
+                        <Text style={{ fontSize: 20, fontWeight: '900', color: isDarkMode ? 'white' : '#14233c', letterSpacing: -0.5 }}>{editingProjectId ? 'Editar Obra' : 'Configurar Novo Estaleiro'}</Text>
+                        <TouchableOpacity onPress={() => { setShowProjectForm(false); setEditingProjectId(null); }} style={{ padding: 4 }}>
                           <X size={20} color="#64748B" />
                         </TouchableOpacity>
                       </View>
@@ -2573,115 +4271,182 @@ export default function App() {
                         <Text style={{ fontSize: 10, fontWeight: '800', color: '#64748B' }}>METROS</Text>
                       </View>
 
+                      <View style={{ flexDirection: 'row', gap: 12, marginBottom: 24 }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 10, fontWeight: '900', color: '#00A3FF', marginBottom: 8, letterSpacing: 1 }}>DATA INÍCIO</Text>
+                          <TextInput
+                            style={[styles.fieldWrapper, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.03)' : '#F8FAFC', marginBottom: 0 }]}
+                            placeholder="AAAA-MM-DD"
+                            value={newProject.start_date}
+                            onChangeText={text => setNewProject({ ...newProject, start_date: text })}
+                          />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 10, fontWeight: '900', color: '#00A3FF', marginBottom: 8, letterSpacing: 1 }}>FIM PREVISTO</Text>
+                          <TextInput
+                            style={[styles.fieldWrapper, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.03)' : '#F8FAFC', marginBottom: 0 }]}
+                            placeholder="AAAA-MM-DD"
+                            value={newProject.end_date}
+                            onChangeText={text => setNewProject({ ...newProject, end_date: text })}
+                          />
+                        </View>
+                      </View>
+
                       <TouchableOpacity
                         style={{ backgroundColor: '#00A3FF', height: 56, borderRadius: 16, alignItems: 'center', justifyContent: 'center', shadowColor: '#00A3FF', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 }}
-                        onPress={handleAddProject}
+                        onPress={editingProjectId ? handleUpdateProject : handleAddProject}
                       >
-                        <Text style={{ color: 'white', fontWeight: '900', fontSize: 15, letterSpacing: 1 }}>CONFIRMAR REGISTO</Text>
+                        <Text style={{ color: 'white', fontWeight: '900', fontSize: 15, letterSpacing: 1 }}>{editingProjectId ? 'ATUALIZAR OBRA' : 'CONFIRMAR REGISTO'}</Text>
                       </TouchableOpacity>
                     </MotiView>
                   )}
 
-                  {workLocations.map(p => (
-                    <TouchableOpacity
-                      activeOpacity={0.9}
-                      key={p.id}
-                      onPress={() => setSelectedProjectForDetails(p)}
-                      style={[styles.projectCardPremium, { backgroundColor: isDarkMode ? '#111111' : 'white', borderColor: isDarkMode ? 'white/5' : 'rgba(0,0,0,0.05)' }]}
-                    >
-                      <View style={styles.projectImageContainer}>
-                        <Image source={{ uri: p.image || 'https://picsum.photos/800/600' }} style={styles.projectImagePremium} />
-                        <View style={[styles.projectStatusBadge, { backgroundColor: p.status === 'active' ? '#10b981' : '#f0cc4a' }]}>
-                          <Text style={styles.projectStatusText}>{(p.status || 'ATIVO').toUpperCase()}</Text>
-                        </View>
-                      </View>
-
-                      <View style={styles.projectInfoPremium}>
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <View style={{ flex: 1 }}>
-                            <Text style={[styles.projectTitlePremium, { color: isDarkMode ? 'white' : '#14233c' }]}>{p.name}</Text>
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
-                              <MapPin size={10} color="#64748B" />
-                              <Text style={styles.projectLocPremium}>{p.latitude.toFixed(4)}, {p.longitude.toFixed(4)}</Text>
-                            </View>
+                  {visibleWorkLocations.map(p => {
+                    const colabCount = employeesList.filter(e => e.location_id === p.id).length;
+                    let daysRemaining = '-';
+                    if (p.end_date) {
+                      const remaining = differenceInDays(new Date(p.end_date), new Date());
+                      daysRemaining = remaining > 0 ? `${remaining}d` : 'Fim';
+                    }
+                    return (
+                      <TouchableOpacity
+                        activeOpacity={0.9}
+                        key={p.id}
+                        onPress={() => setSelectedProjectForDetails(p)}
+                        style={[styles.projectCardPremium, { backgroundColor: isDarkMode ? '#111111' : 'white', borderColor: isDarkMode ? 'white/5' : 'rgba(0,0,0,0.05)' }]}
+                      >
+                        <View style={styles.projectImageContainer}>
+                          <Image source={{ uri: p.image || 'https://picsum.photos/800/600' }} style={styles.projectImagePremium} />
+                          <View style={[styles.projectStatusBadge, { backgroundColor: p.status === 'active' ? '#10b981' : '#f0cc4a' }]}>
+                            <Text style={styles.projectStatusText}>{(p.status || 'ATIVO').toUpperCase()}</Text>
                           </View>
-                          {isGestor && (
-                            <TouchableOpacity
-                              onPress={() => {
-                                Alert.prompt(
-                                  "Editar Progresso",
-                                  "Insira a nova percentagem (0-100):",
-                                  [
-                                    { text: "Cancelar", style: "cancel" },
-                                    {
-                                      text: "Atualizar", onPress: (val) => {
+                        </View>
+
+                        <View style={styles.projectInfoPremium}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={[styles.projectTitlePremium, { color: isDarkMode ? 'white' : '#14233c' }]}>{p.name}</Text>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
+                                <MapPin size={10} color="#64748B" />
+                                <Text style={styles.projectLocPremium}>{p.latitude.toFixed(4)}, {p.longitude.toFixed(4)}</Text>
+                              </View>
+                            </View>
+                            {isGestor && (
+                              <View style={{ flexDirection: 'row', gap: 8 }}>
+                                <TouchableOpacity
+                                  onPress={() => {
+                                    setEditingProjectId(p.id);
+                                    setNewProject({
+                                      name: p.name,
+                                      addressSearch: '',
+                                      latitude: (p.latitude || 0).toString(),
+                                      longitude: (p.longitude || 0).toString(),
+                                      radius_meters: (p.radius_meters || 500).toString(),
+                                      start_date: p.start_date || '',
+                                      end_date: p.end_date || ''
+                                    });
+                                    setShowProjectForm(true);
+                                  }}
+                                  style={styles.iconGhostBtn}
+                                >
+                                  <Edit2 size={14} color="#00A3FF" />
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                  onPress={() => {
+                                    if (Platform.OS === 'web') {
+                                      const val = window.prompt("Insira a nova percentagem (0-100):", String(p.progress || 0));
+                                      if (val !== null) {
                                         const prog = parseInt(val || '0');
                                         if (!isNaN(prog)) {
-                                          setWorkLocations(prev => prev.map(proj =>
-                                            proj.id === p.id ? { ...proj, progress: Math.min(100, Math.max(0, prog)) } : proj
-                                          ));
+                                          const finalProg = Math.min(100, Math.max(0, prog));
+                                          updateDoc(doc(db, 'work_locations', p.id), { progress: finalProg }).catch(e => console.error(e));
+                                          setWorkLocations(prev => prev.map(proj => proj.id === p.id ? { ...proj, progress: finalProg } : proj));
                                         }
                                       }
+                                    } else {
+                                      Alert.prompt(
+                                        "Editar Progresso",
+                                        "Insira a nova percentagem (0-100):",
+                                        [
+                                          { text: "Cancelar", style: "cancel" },
+                                          {
+                                            text: "Atualizar", onPress: async (val) => {
+                                              const prog = parseInt(val || '0');
+                                              if (!isNaN(prog)) {
+                                                const finalProg = Math.min(100, Math.max(0, prog));
+                                                try {
+                                                  await updateDoc(doc(db, 'work_locations', p.id), { progress: finalProg });
+                                                  setWorkLocations(prev => prev.map(proj =>
+                                                    proj.id === p.id ? { ...proj, progress: finalProg } : proj
+                                                  ));
+                                                } catch (e) {
+                                                  console.error(e);
+                                                }
+                                              }
+                                            }
+                                          }
+                                        ],
+                                        'plain-text',
+                                        String(p.progress || 0)
+                                      );
                                     }
-                                  ],
-                                  'plain-text',
-                                  String(p.progress || 0)
+                                  }}
+                                  style={styles.iconGhostBtn}
+                                >
+                                  <Settings size={14} color="#64748B" />
+                                </TouchableOpacity>
+                              </View>
+                            )}
+                          </View>
+
+                          <View style={{ marginTop: 20 }}>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
+                              <Text style={styles.bentoMuted}>PROGRESSO ATUAL</Text>
+                              <Text style={[styles.mono, { fontSize: 12, color: p.themeColor || '#00aeef' }]}>{p.progress || 0}%</Text>
+                            </View>
+                            <View style={[styles.progressBarPremium, { backgroundColor: isDarkMode ? '#1e293b' : '#f1f5f9' }]}>
+                              <MotiView
+                                from={{ width: 0 }}
+                                animate={{ width: `${p.progress || 0}%` }}
+                                transition={{ type: 'spring', damping: 20 }}
+                                style={[styles.progressFillPremium, { backgroundColor: p.themeColor || '#00aeef' }]}
+                              />
+                            </View>
+                          </View>
+
+                          <View style={styles.projectFooter}>
+                            <View style={{ flexDirection: 'row', gap: 12 }}>
+                              <View style={{ alignItems: 'center' }}>
+                                <Text style={[styles.mono, { fontSize: 10, color: isDarkMode ? 'white' : '#14233c' }]}>{colabCount}</Text>
+                                <Text style={styles.bentoMuted}>COLAB.</Text>
+                              </View>
+                              <View style={{ width: 1, height: 16, backgroundColor: 'rgba(100, 116, 139, 0.2)', alignSelf: 'center' }} />
+                              <View style={{ alignItems: 'center' }}>
+                                <Text style={[styles.mono, { fontSize: 10, color: isDarkMode ? 'white' : '#14233c' }]}>{daysRemaining}</Text>
+                                <Text style={styles.bentoMuted}>RESTA</Text>
+                              </View>
+                            </View>
+                            <TouchableOpacity onPress={() => {
+                              if (isGestor) {
+                                Alert.alert(
+                                  'Eliminar Obra',
+                                  'Deseja eliminar esta obra?',
+                                  [
+                                    { text: 'Não', style: 'cancel' },
+                                    { text: 'Sim', style: 'destructive', onPress: () => handleDeleteProject(p.id, p.name) }
+                                  ]
                                 );
-                              }}
-                              style={styles.iconGhostBtn}
-                            >
-                              <Settings size={14} color="#64748B" />
+                              }
+                            }}>
+                              <X size={16} color="#ef4444" opacity={0.5} />
                             </TouchableOpacity>
-                          )}
-                        </View>
-
-                        <View style={{ marginTop: 20 }}>
-                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
-                            <Text style={styles.bentoMuted}>PROGRESSO ATUAL</Text>
-                            <Text style={[styles.mono, { fontSize: 12, color: p.themeColor || '#00aeef' }]}>{p.progress || 0}%</Text>
-                          </View>
-                          <View style={[styles.progressBarPremium, { backgroundColor: isDarkMode ? '#1e293b' : '#f1f5f9' }]}>
-                            <MotiView
-                              from={{ width: 0 }}
-                              animate={{ width: `${p.progress || 0}%` }}
-                              transition={{ type: 'spring', damping: 20 }}
-                              style={[styles.progressFillPremium, { backgroundColor: p.themeColor || '#00aeef' }]}
-                            />
                           </View>
                         </View>
+                      </TouchableOpacity>
+                    )
+                  })}
 
-                        <View style={styles.projectFooter}>
-                          <View style={{ flexDirection: 'row', gap: 12 }}>
-                            <View style={{ alignItems: 'center' }}>
-                              <Text style={[styles.mono, { fontSize: 10, color: isDarkMode ? 'white' : '#14233c' }]}>24</Text>
-                              <Text style={styles.bentoMuted}>COLAB.</Text>
-                            </View>
-                            <View style={{ width: 1, height: 16, backgroundColor: 'rgba(100, 116, 139, 0.2)', alignSelf: 'center' }} />
-                            <View style={{ alignItems: 'center' }}>
-                              <Text style={[styles.mono, { fontSize: 10, color: isDarkMode ? 'white' : '#14233c' }]}>12d</Text>
-                              <Text style={styles.bentoMuted}>RESTA</Text>
-                            </View>
-                          </View>
-                          <TouchableOpacity onPress={() => {
-                            if (isGestor) {
-                              Alert.alert(
-                                'Eliminar Obra',
-                                'Deseja eliminar esta obra?',
-                                [
-                                  { text: 'Não', style: 'cancel' },
-                                  { text: 'Sim', style: 'destructive', onPress: () => handleDeleteProject(p.id, p.name) }
-                                ]
-                              );
-                            }
-                          }}>
-                            <X size={16} color="#ef4444" opacity={0.5} />
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    </TouchableOpacity>
-                  ))}
-
-                  {isGestor && workLocations.length === 0 && (
+                  {isGestor && visibleWorkLocations.length === 0 && (
                     <Text style={styles.placeholderText}>Nenhuma obra registada.</Text>
                   )}
 
@@ -2690,6 +4455,8 @@ export default function App() {
                       project={selectedProjectForDetails}
                       onClose={() => setSelectedProjectForDetails(null)}
                       isDarkMode={isDarkMode}
+                      employeesList={employeesList}
+                      timeLogs={timeLogs}
                     />
                   )}
                 </View>
@@ -2777,171 +4544,210 @@ export default function App() {
 
                   {/* NEW EXPANDED CALENDAR SECTION */}
                   {attendanceMode === 'personal' && (
-                    <MotiView
-                      from={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      style={[styles.calendarContainerPremium, { backgroundColor: isDarkMode ? '#111111' : 'white' }]}
-                    >
-                      {/* Calendar Header */}
-                      <View style={styles.calendarHeaderPremium}>
-                        <View>
-                          <Text style={[styles.calendarMonthText, { color: isDarkMode ? 'white' : '#14233c' }]}>
-                            {format(currentCalendarDate, 'MMMM yyyy', { locale: ptBR }).toUpperCase()}
-                          </Text>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                            <Clock size={10} color="#00A3FF" />
-                            <Text style={[styles.calendarSubText, { color: '#00A3FF', fontWeight: '800' }]}>TOTAL MENSAL: {monthlyHours}</Text>
+                    <View>
+                      {overtimeRequests.filter(or => or.status === 'pending' && or.user_id === currentUser.id).length > 0 && (
+                        <View style={{ gap: 12, marginBottom: 16 }}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Text style={styles.sectionTitle}>PEDIDOS DE HORA EXTRA</Text>
+                            <View style={{ backgroundColor: '#00A3FF', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                              <Text style={{ fontSize: 10, fontWeight: '900', color: 'white' }}>{overtimeRequests.filter(or => or.status === 'pending' && or.user_id === currentUser.id).length}</Text>
+                            </View>
+                          </View>
+
+                          {overtimeRequests.filter(or => or.status === 'pending' && or.user_id === currentUser.id).map(or => (
+                            <View key={or.id} style={[styles.glassCard, { backgroundColor: isDarkMode ? '#1e293b' : 'white', padding: 16 }]}>
+                              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                                <View>
+                                  <Text style={{ fontSize: 13, fontWeight: '900', color: isDarkMode ? 'white' : '#14233c' }}>{or.requested_by_name || 'Gestão'}</Text>
+                                  <Text style={{ fontSize: 11, color: '#64748B' }}>Pede que faças {or.hours}h • {or.date}</Text>
+                                </View>
+                                <View style={{ flexDirection: 'row', gap: 8 }}>
+                                  <TouchableOpacity
+                                    style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(239,68,68,0.1)', alignItems: 'center', justifyContent: 'center' }}
+                                    onPress={() => handleProcessOvertime(or.id, false)}
+                                  >
+                                    <X size={16} color="#ef4444" />
+                                  </TouchableOpacity>
+                                  <TouchableOpacity
+                                    style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(16,185,129,0.1)', alignItems: 'center', justifyContent: 'center' }}
+                                    onPress={() => handleProcessOvertime(or.id, true)}
+                                  >
+                                    <Check size={16} color="#10b981" />
+                                  </TouchableOpacity>
+                                </View>
+                              </View>
+                              <Text style={{ fontSize: 11, color: isDarkMode ? '#94a3b8' : '#64748B', marginTop: 8, fontStyle: 'italic' }}>"{or.reason}"</Text>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+
+                      <MotiView
+                        from={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        style={[styles.calendarContainerPremium, { backgroundColor: isDarkMode ? '#111111' : 'white' }]}
+                      >
+                        {/* Calendar Header */}
+                        <View style={styles.calendarHeaderPremium}>
+                          <View>
+                            <Text style={[styles.calendarMonthText, { color: isDarkMode ? 'white' : '#14233c' }]}>
+                              {format(currentCalendarDate, 'MMMM yyyy', { locale: ptBR }).toUpperCase()}
+                            </Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              <Clock size={10} color="#00A3FF" />
+                              <Text style={[styles.calendarSubText, { color: '#00A3FF', fontWeight: '800' }]}>TOTAL MENSAL: {monthlyHours}</Text>
+                            </View>
+                          </View>
+                          <View style={{ flexDirection: 'row', gap: 8 }}>
+                            <TouchableOpacity
+                              onPress={() => setCurrentCalendarDate(subMonths(currentCalendarDate, 12))}
+                              style={[styles.calendarNavBtn, { backgroundColor: isDarkMode ? '#1e293b' : '#f8fafc' }]}
+                            >
+                              <ChevronsLeft size={18} color={isDarkMode ? 'white' : '#94a3b8'} />
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              onPress={() => setCurrentCalendarDate(subMonths(currentCalendarDate, 1))}
+                              style={[styles.calendarNavBtn, { backgroundColor: isDarkMode ? '#1e293b' : '#f8fafc' }]}
+                            >
+                              <ChevronLeft size={18} color={isDarkMode ? 'white' : '#64748B'} />
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              onPress={() => setCurrentCalendarDate(addMonths(currentCalendarDate, 1))}
+                              style={[styles.calendarNavBtn, { backgroundColor: isDarkMode ? '#1e293b' : '#f8fafc' }]}
+                            >
+                              <ChevronRight size={18} color={isDarkMode ? 'white' : '#64748B'} />
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              onPress={() => setCurrentCalendarDate(addMonths(currentCalendarDate, 12))}
+                              style={[styles.calendarNavBtn, { backgroundColor: isDarkMode ? '#1e293b' : '#f8fafc' }]}
+                            >
+                              <ChevronsRight size={18} color={isDarkMode ? 'white' : '#94a3b8'} />
+                            </TouchableOpacity>
                           </View>
                         </View>
-                        <View style={{ flexDirection: 'row', gap: 8 }}>
-                          <TouchableOpacity
-                            onPress={() => setCurrentCalendarDate(subMonths(currentCalendarDate, 12))}
-                            style={[styles.calendarNavBtn, { backgroundColor: isDarkMode ? '#1e293b' : '#f8fafc' }]}
-                          >
-                            <ChevronsLeft size={18} color={isDarkMode ? 'white' : '#94a3b8'} />
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            onPress={() => setCurrentCalendarDate(subMonths(currentCalendarDate, 1))}
-                            style={[styles.calendarNavBtn, { backgroundColor: isDarkMode ? '#1e293b' : '#f8fafc' }]}
-                          >
-                            <ChevronLeft size={18} color={isDarkMode ? 'white' : '#64748B'} />
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            onPress={() => setCurrentCalendarDate(addMonths(currentCalendarDate, 1))}
-                            style={[styles.calendarNavBtn, { backgroundColor: isDarkMode ? '#1e293b' : '#f8fafc' }]}
-                          >
-                            <ChevronRight size={18} color={isDarkMode ? 'white' : '#64748B'} />
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            onPress={() => setCurrentCalendarDate(addMonths(currentCalendarDate, 12))}
-                            style={[styles.calendarNavBtn, { backgroundColor: isDarkMode ? '#1e293b' : '#f8fafc' }]}
-                          >
-                            <ChevronsRight size={18} color={isDarkMode ? 'white' : '#94a3b8'} />
-                          </TouchableOpacity>
-                        </View>
-                      </View>
 
-                      {/* Weekday Headers */}
-                      <View style={styles.weekdayContainer}>
-                        {['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map(day => (
-                          <Text key={day} style={styles.weekdayText}>{day}</Text>
-                        ))}
-                      </View>
-
-                      {/* Days Grid */}
-                      <View style={styles.daysGrid}>
-                        {(() => {
-                          const monthStart = startOfMonth(currentCalendarDate);
-                          const monthEnd = endOfMonth(monthStart);
-                          const startDate = startOfWeek(monthStart);
-                          const endDate = endOfWeek(monthEnd);
-
-                          const dayRows = eachDayOfInterval({ start: startDate, end: endDate });
-
-                          return dayRows.map((day, idx) => {
-                            const isCurrentMonth = isSameMonth(day, monthStart);
-                            const isDaySelected = isSameDay(day, selectedDate);
-                            const isTodayDay = isToday(day);
-                            const hasLogs = timeLogs.some(log => isSameDay(new Date(log.timestamp), day) && log.app_user_id === currentUser?.id);
-
-                            return (
-                              <TouchableOpacity
-                                key={idx}
-                                onPress={() => setSelectedDate(startOfDay(day))}
-                                style={[
-                                  styles.dayCell,
-                                  isDaySelected && styles.dayCellSelected,
-                                  !isCurrentMonth && { opacity: 0.25 }
-                                ]}
-                              >
-                                <Text style={[
-                                  styles.dayText,
-                                  { color: isDarkMode ? 'white' : '#14233c' },
-                                  isDaySelected && { color: 'white', fontWeight: '900' },
-                                  isTodayDay && !isDaySelected && { color: '#00A3FF', fontWeight: '800' }
-                                ]}>
-                                  {format(day, 'd')}
-                                </Text>
-                                <View style={styles.dotContainer}>
-                                  {hasLogs && <View style={[styles.dayDot, { backgroundColor: '#00A3FF' }]} />}
-                                  {isTodayDay && <View style={[styles.dayDot, { backgroundColor: '#10b981' }]} />}
-                                </View>
-                              </TouchableOpacity>
-                            );
-                          });
-                        })()}
-                      </View>
-
-                      {/* Selected Day Details Card */}
-                      <MotiView
-                        from={{ opacity: 0, translateY: 10 }}
-                        animate={{ opacity: 1, translateY: 0 }}
-                        transition={{ type: 'timing', duration: 300 }}
-                        style={[styles.dayDetailCard, { backgroundColor: isDarkMode ? '#1e293b' : '#f8fafc' }]}
-                      >
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                          <Text style={styles.detailDateText}>
-                            {format(selectedDate, "EEEE, d 'de' MMMM", { locale: ptBR })}
-                          </Text>
-                          <Calendar size={14} color="#00A3FF" />
+                        {/* Weekday Headers */}
+                        <View style={styles.weekdayContainer}>
+                          {['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map(day => (
+                            <Text key={day} style={styles.weekdayText}>{day}</Text>
+                          ))}
                         </View>
 
-                        <View style={{ gap: 10 }}>
+                        {/* Days Grid */}
+                        <View style={styles.daysGrid}>
                           {(() => {
-                            const logsForDay = timeLogs.filter(t => isSameDay(new Date(t.timestamp), selectedDate) && t.app_user_id === currentUser?.id);
+                            const monthStart = startOfMonth(currentCalendarDate);
+                            const monthEnd = endOfMonth(monthStart);
+                            const startDate = startOfWeek(monthStart);
+                            const endDate = endOfWeek(monthEnd);
 
-                            if (logsForDay.length === 0) {
+                            const dayRows = eachDayOfInterval({ start: startDate, end: endDate });
+
+                            return dayRows.map((day, idx) => {
+                              const isCurrentMonth = isSameMonth(day, monthStart);
+                              const isDaySelected = isSameDay(day, selectedDate);
+                              const isTodayDay = isToday(day);
+                              const hasLogs = timeLogs.some(log => isSameDay(new Date(log.timestamp), day) && log.app_user_id === currentUser?.id);
+
                               return (
-                                <View style={styles.calendarDetailRow}>
-                                  <AlertCircle size={12} color="#64748B" />
-                                  <Text style={styles.calendarDetailRowText}>Nenhum registro de ponto encontrado.</Text>
-                                </View>
+                                <TouchableOpacity
+                                  key={idx}
+                                  onPress={() => setSelectedDate(startOfDay(day))}
+                                  style={[
+                                    styles.dayCell,
+                                    isDaySelected && styles.dayCellSelected,
+                                    !isCurrentMonth && { opacity: 0.25 }
+                                  ]}
+                                >
+                                  <Text style={[
+                                    styles.dayText,
+                                    { color: isDarkMode ? 'white' : '#14233c' },
+                                    isDaySelected && { color: 'white', fontWeight: '900' },
+                                    isTodayDay && !isDaySelected && { color: '#00A3FF', fontWeight: '800' }
+                                  ]}>
+                                    {format(day, 'd')}
+                                  </Text>
+                                  <View style={styles.dotContainer}>
+                                    {hasLogs && <View style={[styles.dayDot, { backgroundColor: '#00A3FF' }]} />}
+                                    {isTodayDay && <View style={[styles.dayDot, { backgroundColor: '#10b981' }]} />}
+                                  </View>
+                                </TouchableOpacity>
                               );
-                            }
-
-                            const checkIn = logsForDay.find(l => l.type === 'check_in');
-                            const checkOut = logsForDay.find(l => l.type === 'check_out');
-
-                            let totalHoursStr = '--';
-                            if (checkIn && checkOut) {
-                              const diff = new Date(checkOut.timestamp).getTime() - new Date(checkIn.timestamp).getTime();
-                              const hoursNum = Math.floor(diff / (1000 * 60 * 60));
-                              const minsNum = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-                              totalHoursStr = `${hoursNum}h ${minsNum}m`;
-                            }
-
-                            return (
-                              <>
-                                <View style={{ flexDirection: 'row', gap: 12, marginBottom: 8 }}>
-                                  <View style={{ flex: 1, backgroundColor: isDarkMode ? 'rgba(0,163,255,0.05)' : 'white', padding: 12, borderRadius: 12, borderWidth: 1, borderColor: isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
-                                    <Text style={{ fontSize: 9, fontWeight: '800', color: '#64748B', marginBottom: 4 }}>TOTAL DO DIA</Text>
-                                    <Text style={{ fontSize: 16, fontWeight: '900', color: '#00A3FF' }}>{totalHoursStr}</Text>
-                                  </View>
-                                  <View style={{ flex: 1, backgroundColor: isDarkMode ? 'rgba(16,185,129,0.05)' : 'white', padding: 12, borderRadius: 12, borderWidth: 1, borderColor: isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
-                                    <Text style={{ fontSize: 9, fontWeight: '800', color: '#64748B', marginBottom: 4 }}>EVENTOS</Text>
-                                    <Text style={{ fontSize: 16, fontWeight: '900', color: '#10b981' }}>{logsForDay.length}</Text>
-                                  </View>
-                                </View>
-
-                                {logsForDay.map(log => (
-                                  <View key={log.id} style={[styles.calendarDetailRow, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.02)' : 'white', padding: 10, borderRadius: 10 }]}>
-                                    <View style={{ width: 32, height: 32, borderRadius: 8, backgroundColor: log.type === 'check_in' ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', alignItems: 'center', justifyContent: 'center' }}>
-                                      <Clock size={14} color={log.type === 'check_in' ? '#10b981' : '#ef4444'} />
-                                    </View>
-                                    <View style={{ flex: 1, marginLeft: 12 }}>
-                                      <Text style={[styles.calendarDetailRowText, { fontWeight: '800', color: isDarkMode ? 'white' : '#14233c' }]}>
-                                        {format(new Date(log.timestamp), 'HH:mm')} — {log.type === 'check_in' ? 'Entrada' : 'Saída'}
-                                      </Text>
-                                      <Text style={{ fontSize: 10, color: '#64748B' }}>{log.location_name}</Text>
-                                    </View>
-                                  </View>
-                                ))}
-                              </>
-                            );
+                            });
                           })()}
                         </View>
+
+                        {/* Selected Day Details Card */}
+                        <MotiView
+                          from={{ opacity: 0, translateY: 10 }}
+                          animate={{ opacity: 1, translateY: 0 }}
+                          transition={{ type: 'timing', duration: 300 }}
+                          style={[styles.dayDetailCard, { backgroundColor: isDarkMode ? '#1e293b' : '#f8fafc' }]}
+                        >
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                            <Text style={styles.detailDateText}>
+                              {format(selectedDate, "EEEE, d 'de' MMMM", { locale: ptBR })}
+                            </Text>
+                            <Calendar size={14} color="#00A3FF" />
+                          </View>
+
+                          <View style={{ gap: 10 }}>
+                            {(() => {
+                              const logsForDay = timeLogs.filter(t => isSameDay(new Date(t.timestamp), selectedDate) && t.app_user_id === currentUser?.id);
+
+                              if (logsForDay.length === 0) {
+                                return (
+                                  <View style={styles.calendarDetailRow}>
+                                    <AlertCircle size={12} color="#64748B" />
+                                    <Text style={styles.calendarDetailRowText}>Nenhum registro de ponto encontrado.</Text>
+                                  </View>
+                                );
+                              }
+
+                              const checkIn = logsForDay.find(l => l.type === 'check_in');
+                              const checkOut = logsForDay.find(l => l.type === 'check_out');
+
+                              let totalHoursStr = '--';
+                              if (checkIn && checkOut) {
+                                const diff = new Date(checkOut.timestamp).getTime() - new Date(checkIn.timestamp).getTime();
+                                const hoursNum = Math.floor(diff / (1000 * 60 * 60));
+                                const minsNum = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                                totalHoursStr = `${hoursNum}h ${minsNum}m`;
+                              }
+
+                              return (
+                                <>
+                                  <View style={{ flexDirection: 'row', gap: 12, marginBottom: 8 }}>
+                                    <View style={{ flex: 1, backgroundColor: isDarkMode ? 'rgba(0,163,255,0.05)' : 'white', padding: 12, borderRadius: 12, borderWidth: 1, borderColor: isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
+                                      <Text style={{ fontSize: 9, fontWeight: '800', color: '#64748B', marginBottom: 4 }}>TOTAL DO DIA</Text>
+                                      <Text style={{ fontSize: 16, fontWeight: '900', color: '#00A3FF' }}>{totalHoursStr}</Text>
+                                    </View>
+                                    <View style={{ flex: 1, backgroundColor: isDarkMode ? 'rgba(16,185,129,0.05)' : 'white', padding: 12, borderRadius: 12, borderWidth: 1, borderColor: isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
+                                      <Text style={{ fontSize: 9, fontWeight: '800', color: '#64748B', marginBottom: 4 }}>EVENTOS</Text>
+                                      <Text style={{ fontSize: 16, fontWeight: '900', color: '#10b981' }}>{logsForDay.length}</Text>
+                                    </View>
+                                  </View>
+
+                                  {logsForDay.map(log => (
+                                    <View key={log.id} style={[styles.calendarDetailRow, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.02)' : 'white', padding: 10, borderRadius: 10 }]}>
+                                      <View style={{ width: 32, height: 32, borderRadius: 8, backgroundColor: log.type === 'check_in' ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)', alignItems: 'center', justifyContent: 'center' }}>
+                                        <Clock size={14} color={log.type === 'check_in' ? '#10b981' : '#ef4444'} />
+                                      </View>
+                                      <View style={{ flex: 1, marginLeft: 12 }}>
+                                        <Text style={[styles.calendarDetailRowText, { fontWeight: '800', color: isDarkMode ? 'white' : '#14233c' }]}>
+                                          {format(new Date(log.timestamp), 'HH:mm')} — {log.type === 'check_in' ? 'Entrada' : 'Saída'}
+                                        </Text>
+                                        <Text style={{ fontSize: 10, color: '#64748B' }}>{log.location_name}</Text>
+                                      </View>
+                                    </View>
+                                  ))}
+                                </>
+                              );
+                            })()}
+                          </View>
+                        </MotiView>
                       </MotiView>
-                    </MotiView>
+                    </View>
                   )}
 
                   {attendanceMode === 'personal' ? (
@@ -3049,7 +4855,7 @@ export default function App() {
 
                   <View style={styles.profileDetailsList}>
 
-                    {showEmployeeForm && (
+                    {(isAdmin || isGestor || currentUser?.can_manage_employees) && showEmployeeForm && (
                       <MotiView
                         from={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
@@ -3131,38 +4937,43 @@ export default function App() {
                     )}
 
                     <View style={{ gap: 8 }}>
-                      {employeesList.map(emp => (
-                        <View key={emp.id} style={styles.payslipItem}>
-                          <View style={[styles.avatarHeader, { width: 32, height: 32, borderRadius: 16 }]}>
-                            <User size={16} color="white" />
+                      {(isAdmin || isGestor || currentUser?.can_manage_employees) && visibleEmployees
+                        .filter(emp => {
+                          if (isAdmin) return currentUser?.role === 'super_admin' || emp.role !== 'super_admin';
+                          return emp.role !== 'admin' && emp.role !== 'super_admin';
+                        })
+                        .map(emp => (
+                          <View key={emp.id} style={styles.payslipItem}>
+                            <View style={[styles.avatarHeader, { width: 32, height: 32, borderRadius: 16 }]}>
+                              <User size={16} color="white" />
+                            </View>
+                            <View style={{ flex: 1, marginLeft: 12 }}>
+                              <Text style={styles.payslipMonth}>{emp.name}</Text>
+                              <Text style={styles.payslipVal}>{emp.email} • {emp.role}</Text>
+                            </View>
+                            {emp.id !== currentUser?.id && (
+                              <TouchableOpacity
+                                onPress={() => {
+                                  Alert.alert(
+                                    'Remover Funcionário',
+                                    `Deseja remover ${emp.name} da equipa?`,
+                                    [
+                                      { text: 'Cancelar', style: 'cancel' },
+                                      {
+                                        text: 'Remover',
+                                        style: 'destructive',
+                                        onPress: () => handleDeleteEmployee(emp.id, emp.name)
+                                      }
+                                    ]
+                                  );
+                                }}
+                                style={{ padding: 8 }}
+                              >
+                                <XCircle size={20} color="#ef4444" />
+                              </TouchableOpacity>
+                            )}
                           </View>
-                          <View style={{ flex: 1, marginLeft: 12 }}>
-                            <Text style={styles.payslipMonth}>{emp.name}</Text>
-                            <Text style={styles.payslipVal}>{emp.email} • {emp.role}</Text>
-                          </View>
-                          {emp.id !== currentUser?.id && (
-                            <TouchableOpacity
-                              onPress={() => {
-                                Alert.alert(
-                                  'Remover Funcionário',
-                                  `Deseja remover ${emp.name} da equipa?`,
-                                  [
-                                    { text: 'Cancelar', style: 'cancel' },
-                                    {
-                                      text: 'Remover',
-                                      style: 'destructive',
-                                      onPress: () => handleDeleteEmployee(emp.id, emp.name)
-                                    }
-                                  ]
-                                );
-                              }}
-                              style={{ padding: 8 }}
-                            >
-                              <XCircle size={20} color="#ef4444" />
-                            </TouchableOpacity>
-                          )}
-                        </View>
-                      ))}
+                        ))}
                     </View>
                   </View>
 
@@ -3188,7 +4999,7 @@ export default function App() {
                     <View style={styles.profileSectionHeader}>
                       <Text style={styles.profileSectionTitle}>HORÁRIO DE TRABALHO</Text>
                     </View>
-                    {workSchedules.filter(ws => ws.keycloak_user_id === currentUser?.keycloak_user_id).map(ws => (
+                    {workSchedules.filter(ws => !ws.keycloak_user_id || ws.keycloak_user_id === currentUser?.keycloak_user_id).map(ws => (
                       <View key={ws.id} style={styles.detailRow}>
                         <Calendar size={18} color="#00A3FF" />
                         <View style={{ flex: 1, marginLeft: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -3272,6 +5083,17 @@ export default function App() {
                         <Text style={styles.detailValue}>{notifications.length} Alertas Ativos</Text>
                       </View>
                     </View>
+                    <TouchableOpacity
+                      onPress={() => setShowChangePassword(true)}
+                      style={styles.detailRow}
+                    >
+                      <Lock size={20} color="#00A3FF" />
+                      <View style={{ flex: 1, marginLeft: 15 }}>
+                        <Text style={[styles.detailLabel, { color: '#00A3FF' }]}>SEGURANÇA</Text>
+                        <Text style={styles.detailValue}>Alterar Palavra-passe</Text>
+                      </View>
+                      <ChevronRight size={18} color="#00A3FF" />
+                    </TouchableOpacity>
                     <View style={styles.detailRow}>
                       <Smartphone size={20} color="#64748B" />
                       <View style={{ flex: 1, marginLeft: 15 }}>
@@ -3298,7 +5120,7 @@ export default function App() {
                 </View>
               )}
 
-              {isGestor && activeTab === 'management' && (
+              {canManageSomething && activeTab === 'management' && (
                 <View style={{ gap: 16 }}>
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                     <Text style={[styles.sectionTitlePremium, { color: isDarkMode ? 'white' : '#14233c', fontSize: 24, fontWeight: '900' }]}>Gestão</Text>
@@ -3328,24 +5150,24 @@ export default function App() {
                       <View style={{ flexDirection: 'row', gap: 12 }}>
                         <View style={{ flex: 1, backgroundColor: '#14233c', padding: 16, borderRadius: 20 }}>
                           <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 9, fontWeight: '800' }}>TRABALHANDO AGORA</Text>
-                          <Text style={{ color: 'white', fontSize: 24, fontWeight: '900', marginTop: 4 }}>{employeesList.filter(e => timeLogs.some(l => l.app_user_id === e.id && l.type === 'check_in' && isToday(new Date(l.timestamp)))).length}</Text>
+                          <Text style={{ color: 'white', fontSize: 24, fontWeight: '900', marginTop: 4 }}>{managementStats.workingCount}</Text>
                         </View>
                         <View style={{ flex: 1, backgroundColor: isDarkMode ? '#1e293b' : 'white', padding: 16, borderRadius: 20, borderWidth: 1, borderColor: isDarkMode ? '#334155' : '#e2e8f0' }}>
                           <Text style={{ color: '#64748B', fontSize: 9, fontWeight: '800' }}>ALERTAS HOJE</Text>
-                          <Text style={{ color: '#FE4A49', fontSize: 24, fontWeight: '900', marginTop: 4 }}>{notifications.filter(n => isToday(new Date(n.timestamp)) && n.type === 'warning').length}</Text>
+                          <Text style={{ color: '#FE4A49', fontSize: 24, fontWeight: '900', marginTop: 4 }}>{managementStats.alertsToday}</Text>
                         </View>
                       </View>
 
                       <View style={{ gap: 12 }}>
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 }}>
                           <Text style={styles.sectionTitle}>PEDIDOS PENDENTES</Text>
                           <View style={{ backgroundColor: '#f0cc4a', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
-                            <Text style={{ fontSize: 10, fontWeight: '900', color: '#14233c' }}>{leaveRequests.filter(lr => lr.status === 'pending').length}</Text>
+                            <Text style={{ fontSize: 10, fontWeight: '900', color: '#14233c' }}>{managementStats.pendingLeaves}</Text>
                           </View>
                         </View>
 
                         {leaveRequests.filter(lr => lr.status === 'pending').map(lr => {
-                          const emp = employeesList.find(e => e.keycloak_user_id === lr.keycloak_user_id);
+                          const emp = visibleEmployees.find(e => e.keycloak_user_id === lr.keycloak_user_id);
                           return (
                             <View key={lr.id} style={[styles.glassCard, { backgroundColor: isDarkMode ? '#1e293b' : 'white', padding: 16 }]}>
                               <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
@@ -3387,7 +5209,7 @@ export default function App() {
 
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
                           <Text style={styles.sectionTitle}>Equipa e Alocações</Text>
-                          {isAdmin && (
+                          {(isAdmin || isGestor || currentUser?.can_manage_employees) && (
                             <TouchableOpacity
                               style={[styles.smallBtn, { backgroundColor: '#00aeef' }]}
                               onPress={() => setShowEmployeeForm(!showEmployeeForm)}
@@ -3400,8 +5222,8 @@ export default function App() {
                         {/* Project Allocation Summary */}
                         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }}>
                           <View style={{ flexDirection: 'row', gap: 12 }}>
-                            {workLocations.map(loc => {
-                              const workerCount = employeesList.filter(e => e.location_id === loc.id).length;
+                            {visibleWorkLocations.map(loc => {
+                              const workerCount = visibleEmployees.filter(e => e.location_id === loc.id).length;
                               return (
                                 <View key={loc.id} style={{ backgroundColor: isDarkMode ? '#1e293b' : 'white', padding: 12, borderRadius: 16, width: 140, borderWidth: 1, borderColor: isDarkMode ? '#334155' : '#f1f5f9' }}>
                                   <Text style={{ fontSize: 10, fontWeight: '800', color: '#64748B', marginBottom: 4 }}>{loc.name.toUpperCase()}</Text>
@@ -3439,7 +5261,7 @@ export default function App() {
 
                             <Text style={{ fontSize: 12, fontWeight: '700', color: '#64748B', marginBottom: 8, marginTop: 8 }}>ALOCAR A OBRA (OPCIONAL)</Text>
                             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
-                              {workLocations.map(loc => (
+                              {visibleWorkLocations.map(loc => (
                                 <TouchableOpacity
                                   key={loc.id}
                                   onPress={() => setNewEmployee({ ...newEmployee, location_id: loc.id })}
@@ -3462,87 +5284,92 @@ export default function App() {
                         )}
 
                         <View style={{ gap: 8 }}>
-                          {employeesList
-                            .filter(e =>
-                              e.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                              e.email?.toLowerCase().includes(searchTerm.toLowerCase())
-                            )
-                            .map(emp => {
-                              const empWork = workLocations.find(l => l.id === emp.location_id);
-                              const isAssigning = assigningEmployeeId === emp.id;
-                              return (
-                                <View key={emp.id} style={{ marginBottom: 8 }}>
-                                  <View style={[styles.payslipItem, { borderLeftWidth: empWork ? 4 : 0, borderLeftColor: '#00aeef' }]}>
-                                    <View style={[styles.avatarHeader, { width: 32, height: 32, borderRadius: 16 }]}>
-                                      <User size={16} color="white" />
-                                    </View>
-                                    <View style={{ flex: 1, marginLeft: 12 }}>
-                                      <Text style={[styles.payslipMonth, { fontSize: 14 }]}>{emp.name}</Text>
-                                      <Text style={[styles.payslipVal, { fontSize: 11 }]}>{emp.email}</Text>
-                                      {empWork && (
-                                        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4, gap: 4 }}>
-                                          <MapPin size={10} color="#00aeef" />
-                                          <Text style={{ fontSize: 10, color: '#00aeef', fontWeight: '800' }}>{empWork.name.toUpperCase()}</Text>
-                                        </View>
-                                      )}
-                                    </View>
-                                    <View style={{ flexDirection: 'row', gap: 8 }}>
-                                      {isAdmin && (
-                                        <TouchableOpacity
-                                          style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: isAssigning ? '#00aeef' : (isDarkMode ? '#334155' : '#f1f5f9'), alignItems: 'center', justifyContent: 'center' }}
-                                          onPress={() => setAssigningEmployeeId(isAssigning ? null : emp.id)}
-                                        >
-                                          <HardHat size={14} color={isAssigning ? "white" : "#64748B"} />
-                                        </TouchableOpacity>
-                                      )}
+                          {filteredEmployeesForMgmt.map(emp => {
+                            const empWork = visibleWorkLocations.find(l => l.id === emp.location_id);
+                            const isAssigning = assigningEmployeeId === emp.id;
+                            return (
+                              <View key={emp.id} style={{ marginBottom: 8 }}>
+                                <View style={[styles.payslipItem, { borderLeftWidth: empWork ? 4 : 0, borderLeftColor: '#00aeef' }]}>
+                                  <View style={[styles.avatarHeader, { width: 32, height: 32, borderRadius: 16 }]}>
+                                    <User size={16} color="white" />
+                                    {emp.last_location?.out_of_bounds && (
+                                      <View style={{ position: 'absolute', top: -2, right: -2, width: 10, height: 10, borderRadius: 5, backgroundColor: '#ef4444', borderWidth: 2, borderColor: isDarkMode ? '#1e293b' : 'white' }} />
+                                    )}
+                                  </View>
+                                  <View style={{ flex: 1, marginLeft: 12 }}>
+                                    <Text style={[styles.payslipMonth, { fontSize: 14 }]}>{emp.name}</Text>
+                                    <Text style={[styles.payslipVal, { fontSize: 11 }]}>{emp.email}</Text>
+                                    {empWork && (
+                                      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4, gap: 4 }}>
+                                        <MapPin size={10} color="#00aeef" />
+                                        <Text style={{ fontSize: 10, color: '#00aeef', fontWeight: '800' }}>{empWork.name.toUpperCase()}</Text>
+                                      </View>
+                                    )}
+                                  </View>
+                                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                                    {(isAdmin || isGestor || currentUser?.can_manage_projects || currentUser?.can_manage_employees) && emp.role !== 'super_admin' && (
                                       <TouchableOpacity
                                         style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: isDarkMode ? '#334155' : '#f1f5f9', alignItems: 'center', justifyContent: 'center' }}
-                                        onPress={() => setSelectedUserDetail(emp)}
+                                        onPress={() => handleExportIndividual(emp)}
                                       >
-                                        <ChevronRight size={14} color="#64748B" />
+                                        <Download size={14} color="#00aeef" />
                                       </TouchableOpacity>
-                                    </View>
-                                  </View>
-
-                                  {isAssigning && (
-                                    <MotiView
-                                      from={{ opacity: 0, scaleY: 0 }}
-                                      animate={{ opacity: 1, scaleY: 1 }}
-                                      style={{ backgroundColor: isDarkMode ? '#1e293b' : 'white', padding: 12, borderRadius: 16, marginTop: 4, borderWidth: 1, borderColor: '#00aeef' }}
+                                    )}
+                                    {(isAdmin || isGestor || currentUser?.can_manage_projects || currentUser?.can_manage_employees) && emp.role !== 'super_admin' && (
+                                      <TouchableOpacity
+                                        style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: isAssigning ? '#00aeef' : (isDarkMode ? '#334155' : '#f1f5f9'), alignItems: 'center', justifyContent: 'center' }}
+                                        onPress={() => setAssigningEmployeeId(isAssigning ? null : emp.id)}
+                                      >
+                                        <HardHat size={14} color={isAssigning ? "white" : "#64748B"} />
+                                      </TouchableOpacity>
+                                    )}
+                                    {(isAdmin || isGestor || currentUser?.can_manage_projects || currentUser?.can_manage_employees) && emp.role !== 'super_admin' && emp.last_location?.out_of_bounds && (
+                                      <TouchableOpacity
+                                        style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: 'rgba(239,68,68,0.1)', alignItems: 'center', justifyContent: 'center' }}
+                                        onPress={() => {
+                                          // Mocking a log record to show on map
+                                          const mockLog: TimeLog = {
+                                            id: 'mock-' + emp.id,
+                                            timestamp: emp.last_location?.timestamp || new Date().toISOString(),
+                                            type: 'check_in',
+                                            work_location_id: emp.location_id || '',
+                                            location_name: 'Fora de Limites',
+                                            latitude: emp.last_location?.latitude || 0,
+                                            longitude: emp.last_location?.longitude || 0,
+                                            valid: true,
+                                            employee_name: emp.name || 'Funcionário',
+                                            platform: 'mobile'
+                                          } as any; // Cast for mock log if needed
+                                          setSelectedRecordForMap(mockLog);
+                                        }}
+                                      >
+                                        <MapIcon size={14} color="#ef4444" />
+                                      </TouchableOpacity>
+                                    )}
+                                    <TouchableOpacity
+                                      style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: isDarkMode ? '#334155' : '#f1f5f9', alignItems: 'center', justifyContent: 'center' }}
+                                      onPress={() => setSelectedUserDetail(emp)}
                                     >
-                                      <Text style={{ fontSize: 10, fontWeight: '800', color: '#64748B', marginBottom: 8 }}>ALTERAR ALOCAÇÃO:</Text>
-                                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                                        {workLocations.map(loc => (
-                                          <TouchableOpacity
-                                            key={loc.id}
-                                            onPress={async () => {
-                                              try {
-                                                await updateDoc(doc(db, 'users', emp.id), {
-                                                  location_id: loc.id,
-                                                  updated_at: new Date().toISOString()
-                                                });
-                                                setAssigningEmployeeId(null);
-                                              } catch (error) {
-                                                handleFirestoreError(error, OperationType.UPDATE, `users/${emp.id}`);
-                                              }
-                                            }}
-                                            style={{
-                                              paddingHorizontal: 12,
-                                              paddingVertical: 6,
-                                              borderRadius: 10,
-                                              borderWidth: 1,
-                                              borderColor: emp.location_id === loc.id ? '#00aeef' : (isDarkMode ? '#334155' : '#E2E8F0'),
-                                              backgroundColor: emp.location_id === loc.id ? '#00aeef' : 'transparent'
-                                            }}
-                                          >
-                                            <Text style={{ fontSize: 10, fontWeight: 'bold', color: emp.location_id === loc.id ? 'white' : (isDarkMode ? '#94a3b8' : '#64748B') }}>{loc.name}</Text>
-                                          </TouchableOpacity>
-                                        ))}
+                                      <ChevronRight size={14} color="#64748B" />
+                                    </TouchableOpacity>
+                                  </View>
+                                </View>
+
+                                {isAssigning && (
+                                  <MotiView
+                                    from={{ opacity: 0, scaleY: 0 }}
+                                    animate={{ opacity: 1, scaleY: 1 }}
+                                    style={{ backgroundColor: isDarkMode ? '#1e293b' : 'white', padding: 12, borderRadius: 16, marginTop: 4, borderWidth: 1, borderColor: '#00aeef' }}
+                                  >
+                                    <Text style={{ fontSize: 10, fontWeight: '800', color: '#64748B', marginBottom: 8 }}>ALTERAR ALOCAÇÃO:</Text>
+                                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                                      {visibleWorkLocations.map(loc => (
                                         <TouchableOpacity
+                                          key={loc.id}
                                           onPress={async () => {
                                             try {
                                               await updateDoc(doc(db, 'users', emp.id), {
-                                                location_id: deleteField(),
+                                                location_id: loc.id,
                                                 updated_at: new Date().toISOString()
                                               });
                                               setAssigningEmployeeId(null);
@@ -3554,24 +5381,48 @@ export default function App() {
                                             paddingHorizontal: 12,
                                             paddingVertical: 6,
                                             borderRadius: 10,
-                                            backgroundColor: !emp.location_id ? '#EF4444' : (isDarkMode ? '#334155' : '#E2E8F0')
+                                            borderWidth: 1,
+                                            borderColor: emp.location_id === loc.id ? '#00aeef' : (isDarkMode ? '#334155' : '#E2E8F0'),
+                                            backgroundColor: emp.location_id === loc.id ? '#00aeef' : 'transparent'
                                           }}
                                         >
-                                          <Text style={{ fontSize: 10, fontWeight: 'bold', color: !emp.location_id ? 'white' : (isDarkMode ? '#94a3b8' : '#64748B') }}>Remover</Text>
+                                          <Text style={{ fontSize: 10, fontWeight: 'bold', color: emp.location_id === loc.id ? 'white' : (isDarkMode ? '#94a3b8' : '#64748B') }}>{loc.name}</Text>
                                         </TouchableOpacity>
-                                      </View>
-                                    </MotiView>
-                                  )}
-                                </View>
-                              );
-                            })}
+                                      ))}
+                                      <TouchableOpacity
+                                        onPress={async () => {
+                                          try {
+                                            await updateDoc(doc(db, 'users', emp.id), {
+                                              location_id: deleteField(),
+                                              updated_at: new Date().toISOString()
+                                            });
+                                            setAssigningEmployeeId(null);
+                                          } catch (error) {
+                                            handleFirestoreError(error, OperationType.UPDATE, `users/${emp.id}`);
+                                          }
+                                        }}
+                                        style={{
+                                          paddingHorizontal: 12,
+                                          paddingVertical: 6,
+                                          borderRadius: 10,
+                                          backgroundColor: !emp.location_id ? '#EF4444' : (isDarkMode ? '#334155' : '#E2E8F0')
+                                        }}
+                                      >
+                                        <Text style={{ fontSize: 10, fontWeight: 'bold', color: !emp.location_id ? 'white' : (isDarkMode ? '#94a3b8' : '#64748B') }}>Remover</Text>
+                                      </TouchableOpacity>
+                                    </View>
+                                  </MotiView>
+                                )}
+                              </View>
+                            );
+                          })}
                         </View>
                       </View>
 
                       <View style={{ marginTop: 12 }}>
                         <Text style={[styles.sectionTitle, { marginBottom: 12 }]}>MONITORIZAÇÃO REAL-TIME</Text>
                         <View style={{ gap: 12 }}>
-                          {timeLogs.slice(0, 10).map(record => {
+                          {visibleTimeLogs.slice(0, 10).map(record => {
                             return (
                               <TouchableOpacity
                                 key={record.id}
@@ -3618,13 +5469,64 @@ export default function App() {
                           timeLogs={timeLogs}
                           workLocations={workLocations}
                           showNotification={showNotification}
+                          isAdmin={isAdmin}
+                          isManager={isAdmin || isGestor || !!currentUser?.can_manage_employees}
+                          onUpdateUser={handleUpdateUser}
+                          onDeleteEmployee={handleDeleteEmployee}
+                          onRequestOvertime={handleRequestOvertime}
                         />
                       )}
 
                       <View style={[styles.profileDetailsList, { backgroundColor: isDarkMode ? '#1e293b' : 'white', marginTop: 12 }]}>
                         <View style={styles.profileSectionHeader}>
                           <Text style={styles.profileSectionTitle}>POLÍTICAS E ESCALAS</Text>
+                          {(isAdmin || isGestor || currentUser?.can_manage_employees) && (
+                            <TouchableOpacity onPress={() => setShowWorkScheduleForm(true)}>
+                              <Plus size={16} color="#00A3FF" />
+                            </TouchableOpacity>
+                          )}
                         </View>
+
+                        {showWorkScheduleForm && (
+                          <MotiView
+                            from={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            style={{ padding: 16, backgroundColor: isDarkMode ? 'rgba(255,255,255,0.03)' : '#F8FAFC', borderRadius: 12, marginBottom: 12 }}
+                          >
+                            <Text style={{ fontSize: 10, fontWeight: '900', color: '#64748B', marginBottom: 8 }}>CONFIGURAR ESCALA</Text>
+                            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+                              <TextInput
+                                style={[styles.fieldWrapper, { flex: 1, height: 40, marginBottom: 0 }]}
+                                placeholder="Dia (Ex: Terça)"
+                                value={newSchedule.day_of_week}
+                                onChangeText={t => setNewSchedule({ ...newSchedule, day_of_week: t })}
+                              />
+                            </View>
+                            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16 }}>
+                              <TextInput
+                                style={[styles.fieldWrapper, { flex: 1, height: 40, marginBottom: 0 }]}
+                                placeholder="Entrada (08:00)"
+                                value={newSchedule.start_time}
+                                onChangeText={t => setNewSchedule({ ...newSchedule, start_time: t })}
+                              />
+                              <TextInput
+                                style={[styles.fieldWrapper, { flex: 1, height: 40, marginBottom: 0 }]}
+                                placeholder="Saída (17:00)"
+                                value={newSchedule.end_time}
+                                onChangeText={t => setNewSchedule({ ...newSchedule, end_time: t })}
+                              />
+                            </View>
+                            <View style={{ flexDirection: 'row', gap: 12 }}>
+                              <TouchableOpacity style={{ flex: 1, height: 40, borderRadius: 8, backgroundColor: '#00A3FF', alignItems: 'center', justifyContent: 'center' }} onPress={handleAddSchedule}>
+                                <Text style={{ color: 'white', fontWeight: 'bold' }}>SALVAR</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity style={{ flex: 1, height: 40, borderRadius: 8, backgroundColor: 'rgba(239,68,68,0.1)', alignItems: 'center', justifyContent: 'center' }} onPress={() => setShowWorkScheduleForm(false)}>
+                                <Text style={{ color: '#ef4444', fontWeight: 'bold' }}>CANCELAR</Text>
+                              </TouchableOpacity>
+                            </View>
+                          </MotiView>
+                        )}
+
                         {workSchedules.map(ws => {
                           return (
                             <View key={ws.id} style={styles.detailRow}>
@@ -3632,13 +5534,24 @@ export default function App() {
                               <View style={{ flex: 1, marginLeft: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <Text style={styles.detailLabel}>{ws.day_of_week}</Text>
                                 <Text style={styles.detailValue}>{ws.start_time} — {ws.end_time}</Text>
+                                {(isAdmin || isGestor || currentUser?.can_manage_employees) && (
+                                  <TouchableOpacity onPress={async () => {
+                                    try {
+                                      await deleteDoc(doc(db, 'work_schedules', ws.id));
+                                    } catch (e) {
+                                      console.error(e);
+                                    }
+                                  }}>
+                                    <X size={14} color="#ef4444" />
+                                  </TouchableOpacity>
+                                )}
                               </View>
                             </View>
                           );
                         })}
                       </View>
                     </View>
-                  ) : (
+                  ) : isAdmin ? (
                     <MotiView
                       from={{ opacity: 0, translateX: -20 }}
                       animate={{ opacity: 1, translateX: 0 }}
@@ -3649,203 +5562,10 @@ export default function App() {
                           <ShieldAlert size={20} color="#FE4A49" />
                           <View style={{ flex: 1 }}>
                             <Text style={{ fontSize: 16, fontWeight: '900', color: isDarkMode ? 'white' : '#14233c' }}>Painel de Acessos</Text>
-                            <Text style={{ fontSize: 11, color: '#64748B' }}>Gestão de identidades e permissões</Text>
                           </View>
                           <TouchableOpacity
-                            style={{ backgroundColor: '#14233c', padding: 12, borderRadius: 14, flexDirection: 'row', alignItems: 'center', gap: 8 }}
-                            onPress={async () => {
-                              try {
-                                showNotification('Relatório Geral', 'Compilando histórico de todos os colaboradores...', 'success');
-
-                                const collectiveQrData = JSON.stringify({
-                                  type: 'COLLECTIVE_REPORT',
-                                  total_users: employeesList.length,
-                                  generated_at: new Date().toISOString()
-                                });
-                                const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(collectiveQrData)}`;
-
-                                let usersHtml = '';
-
-                                employeesList.forEach((user) => {
-                                  const userLogsList = timeLogs
-                                    .filter(l => l.app_user_id === user.id)
-                                    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-                                    .slice(0, 50); // Últimos 50 de cada para o geral
-
-                                  usersHtml += `
-                                  <div class="user-section">
-                                    <div class="user-header">
-                                      <h3 class="user-name">${user.name}</h3>
-                                      <span class="user-email">${user.email}</span>
-                                    </div>
-                                    ${userLogsList.length > 0 ? `
-                                      <table>
-                                        <thead>
-                                          <tr>
-                                            <th>DATA / HORA</th>
-                                            <th>TIPO</th>
-                                            <th>LOCALIZAÇÃO / OBRA</th>
-                                          </tr>
-                                        </thead>
-                                        <tbody>
-                                          ${userLogsList.map(log => `
-                                            <tr>
-                                              <td><strong>${format(new Date(log.timestamp), 'dd/MM/yyyy HH:mm')}</strong></td>
-                                              <td>
-                                                <span class="type-badge ${log.type === 'check_in' ? 'type-in' : 'type-out'}">
-                                                  ${log.type === 'check_in' ? 'ENTRADA' : 'SAÍDA'}
-                                                </span>
-                                              </td>
-                                              <td>${log.location_name || 'N/A'}</td>
-                                            </tr>
-                                          `).join('')}
-                                        </tbody>
-                                      </table>
-                                    ` : `<p style="padding: 20px; color: #94a3b8; font-style: italic; font-size: 11px;">Nenhum registo encontrado para este período.</p>`}
-                                  </div>
-                                `;
-                                });
-
-                                const htmlContent = `
-                                <html>
-                                  <head>
-                                    <meta charset="utf-8">
-                                    <style>
-                                      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
-                                      body { 
-                                        font-family: 'Inter', sans-serif; 
-                                        padding: 30px; 
-                                        color: #1e293b; 
-                                        line-height: 1.5;
-                                      }
-                                      .top-bar {
-                                        display: flex;
-                                        justify-content: space-between;
-                                        align-items: flex-start;
-                                        margin-bottom: 40px;
-                                        border-bottom: 2px solid #00bff3;
-                                        padding-bottom: 20px;
-                                      }
-                                      .logo {
-                                        max-width: 200px;
-                                        height: auto;
-                                      }
-                                      .report-header {
-                                        text-align: right;
-                                      }
-                                      .report-header h1 {
-                                        margin: 0;
-                                        color: #14233c;
-                                        font-size: 20px;
-                                        font-weight: 700;
-                                      }
-                                      .report-header p {
-                                        margin: 5px 0 0;
-                                        color: #00bff3;
-                                        font-size: 11px;
-                                        font-weight: 700;
-                                        text-transform: uppercase;
-                                      }
-                                      .qr-img { 
-                                        width: 70px; 
-                                        height: 70px; 
-                                        border: 1px solid #e2e8f0;
-                                        border-radius: 8px;
-                                        margin-top: 10px;
-                                      }
-                                      .user-section { 
-                                        margin-bottom: 30px; 
-                                        page-break-inside: avoid; 
-                                        border: 1px solid #e2e8f0;
-                                        border-radius: 12px;
-                                        overflow: hidden;
-                                      }
-                                      .user-header { 
-                                        background: #f8fafc; 
-                                        padding: 12px 20px; 
-                                        border-bottom: 1px solid #e2e8f0;
-                                        display: flex;
-                                        justify-content: space-between;
-                                        align-items: center;
-                                      }
-                                      .user-name { 
-                                        font-size: 14px; 
-                                        font-weight: 700;
-                                        color: #14233c;
-                                        margin: 0;
-                                      }
-                                      .user-email {
-                                        font-size: 11px;
-                                        color: #64748b;
-                                      }
-                                      table { 
-                                        width: 100%; 
-                                        border-collapse: collapse; 
-                                        font-size: 10px; 
-                                      }
-                                      th { 
-                                        background: #ffffff;
-                                        text-align: left; 
-                                        padding: 10px 20px; 
-                                        border-bottom: 1px solid #e2e8f0;
-                                        color: #64748b;
-                                        text-transform: uppercase;
-                                        font-size: 9px;
-                                        font-weight: 700;
-                                      }
-                                      td { 
-                                        padding: 10px 20px; 
-                                        border-bottom: 1px solid #f1f5f9; 
-                                        color: #334155;
-                                      }
-                                      .type-badge {
-                                        padding: 2px 6px;
-                                        border-radius: 4px;
-                                        font-weight: 700;
-                                        font-size: 8px;
-                                      }
-                                      .type-in { background: #dcfce7; color: #166534; }
-                                      .type-out { background: #fee2e2; color: #991b1b; }
-                                      .footer {
-                                        text-align: center;
-                                        font-size: 9px;
-                                        color: #94a3b8;
-                                        margin-top: 40px;
-                                      }
-                                    </style>
-                                  </head>
-                                  <body>
-                                    <div class="top-bar">
-                                      <img src="https://firebasestorage.googleapis.com/v0/b/objetivo-similar-mobile.appspot.com/o/public%2Flogo_empresa.png?alt=media" class="logo" onerror="this.src='https://placehold.co/200x60/14233c/ffffff?text=OBJETIVO+SIMILAR'"/>
-                                      <div class="report-header">
-                                        <h1>EXTRACTO GERAL DE FREQUÊNCIA</h1>
-                                        <p>CONTROLO MENSAL - ${format(new Date(), 'MMMM yyyy', { locale: ptBR })}</p>
-                                        <img src="${qrCodeUrl}" class="qr-img" />
-                                      </div>
-                                    </div>
-                                    ${usersHtml}
-                                    <div class="footer">
-                                      Relatório consolidado gerado em ${format(new Date(), 'dd/MM/yyyy HH:mm:ss')}<br/>
-                                      Objetivo Similar Lda - Construção Civil e Engenharia
-                                    </div>
-                                  </body>
-                                </html>
-                              `;
-
-                                const { uri } = await Print.printToFileAsync({ html: htmlContent });
-
-                                if (Platform.OS === 'ios' || Platform.OS === 'android') {
-                                  await Sharing.shareAsync(uri, { UTI: '.pdf', mimeType: 'application/pdf' });
-                                } else {
-                                  await Print.printAsync({ html: htmlContent });
-                                }
-
-                                showNotification('Exportação Concluída', 'O relatório geral foi gerado com sucesso.', 'success');
-                              } catch (err) {
-                                console.error(err);
-                                showNotification('Erro Exportação', 'Não foi possível compilar o relatório coletivo.', 'error');
-                              }
-                            }}
+                            style={{ backgroundColor: '#00A3FF', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, flexDirection: 'row', alignItems: 'center', gap: 6 }}
+                            onPress={handleExportGeneral}
                           >
                             <Download size={18} color="white" />
                             <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 12 }}>Exportar Todos</Text>
@@ -3927,6 +5647,20 @@ export default function App() {
                                       <Text style={{ fontSize: 9, fontWeight: '900', color: user.role === role ? 'white' : '#64748B' }}>{role.toUpperCase()}</Text>
                                     </TouchableOpacity>
                                   ))}
+                                  <TouchableOpacity
+                                    onPress={() => handleExportIndividual(user)}
+                                    style={{
+                                      paddingHorizontal: 10,
+                                      paddingVertical: 8,
+                                      borderRadius: 10,
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      backgroundColor: '#00A3FF',
+                                      marginLeft: 4
+                                    }}
+                                  >
+                                    <Download size={14} color="white" />
+                                  </TouchableOpacity>
                                 </View>
                               </View>
                             ))}
@@ -3940,7 +5674,7 @@ export default function App() {
                         </Text>
                       </View>
                     </MotiView>
-                  )}
+                  ) : null}
                 </View>
               )}
             </MotiView>
@@ -3951,7 +5685,7 @@ export default function App() {
               { id: 'home', icon: Home, label: 'Início', hide: false },
               { id: 'projects', icon: Construction, label: 'Obras', hide: false },
               { id: 'attendance', icon: Clock, label: 'Ponto', hide: false },
-              { id: 'management', icon: Users, label: 'Gestão', hide: !isGestor },
+              { id: 'management', icon: Users, label: 'Gestão', hide: !canManageSomething },
               { id: 'profile', icon: User, label: 'Conta', hide: false },
             ] as { id: Tab, icon: any, label: string, hide: boolean }[]).filter(item => !item.hide).map((item) => {
               const isActive = activeTab === item.id;
@@ -4009,7 +5743,7 @@ export default function App() {
                   {[
                     { id: 'scan', label: 'Escanear QR', icon: QrCode, color: '#00A3FF', action: () => { setIsFloatingMenuOpen(false); showNotification('Scanner', 'Scanner de QR Code ativado.', 'warning'); } },
                     { id: 'checkin', label: isClockedIn ? 'Check-out' : 'Check-in', icon: isClockedIn ? LogOut : MapPin, color: isClockedIn ? '#FE4A49' : '#00A3FF', action: () => { setIsFloatingMenuOpen(false); handleGPSCheckInOut(); } },
-                    { id: 'project', label: 'Nova Obra', icon: Construction, color: '#f0cc4a', action: () => { setIsFloatingMenuOpen(false); setActiveTab('projects'); setShowProjectForm(true); }, hide: !isGestor },
+                    { id: 'project', label: 'Nova Obra', icon: Construction, color: '#f0cc4a', action: () => { setIsFloatingMenuOpen(false); setActiveTab('projects'); setEditingProjectId(null); setShowProjectForm(true); setNewProject({ name: '', addressSearch: '', latitude: '', longitude: '', radius_meters: '500', start_date: format(new Date(), 'yyyy-MM-dd'), end_date: '' }); }, hide: !isAdmin && !currentUser?.can_manage_projects },
                   ].filter(item => !item.hide).map((item, index) => (
                     <MotiView
                       key={item.id}
@@ -4141,34 +5875,45 @@ export default function App() {
           </View>
         </Modal>
 
-        <AnimatePresence>
-          {notification.visible && (
-            <MotiView
-              from={{ opacity: 0, scale: 0.9, translateY: 50 }}
-              animate={{ opacity: 1, scale: 1, translateY: 0 }}
-              exit={{ opacity: 0, scale: 0.9, translateY: 50 }}
-              style={styles.notifOverlay}
-            >
-              <View style={styles.customNotifCard}>
-                <View style={[styles.customNotifIconContainer, { backgroundColor: notification.type === 'success' ? '#10b981' : notification.type === 'error' ? '#ef4444' : '#f59e0b' }]}>
-                  {notification.type === 'success' ? <CheckCircle2 size={32} color="#fff" /> :
-                    notification.type === 'error' ? <XCircle size={32} color="#fff" /> :
-                      <AlertTriangle size={32} color="#fff" />}
-                </View>
-
-                <Text style={styles.customNotifTitle}>{notification.title}</Text>
-                <Text style={styles.customNotifMessage}>{notification.message}</Text>
-
-                <TouchableOpacity
-                  style={[styles.customNotifButton, { backgroundColor: notification.type === 'success' ? '#10b981' : notification.type === 'error' ? '#ef4444' : '#f59e0b' }]}
-                  onPress={closeNotification}
-                >
-                  <Text style={styles.customNotifButtonText}>ENTENDIDO</Text>
-                </TouchableOpacity>
+        <Modal transparent visible={notification.visible} animationType="none" onRequestClose={closeNotification}>
+          <MotiView
+            from={{ opacity: 0, scale: 0.9, translateY: 50 }}
+            animate={{ opacity: 1, scale: 1, translateY: 0 }}
+            exit={{ opacity: 0, scale: 0.9, translateY: 50 }}
+            style={styles.notifOverlay}
+          >
+            <View style={styles.customNotifCard}>
+              <View style={[styles.customNotifIconContainer, { backgroundColor: notification.type === 'success' ? '#10b981' : notification.type === 'error' ? '#ef4444' : '#f59e0b' }]}>
+                {notification.type === 'success' ? <CheckCircle2 size={32} color="#fff" /> :
+                  notification.type === 'error' ? <XCircle size={32} color="#fff" /> :
+                    <AlertTriangle size={32} color="#fff" />}
               </View>
-            </MotiView>
-          )}
-        </AnimatePresence>
+
+              <Text style={styles.customNotifTitle}>{notification.title}</Text>
+              <Text style={styles.customNotifMessage}>{notification.message}</Text>
+
+              <TouchableOpacity
+                style={[styles.customNotifButton, { backgroundColor: notification.type === 'success' ? '#10b981' : notification.type === 'error' ? '#ef4444' : '#f59e0b' }]}
+                onPress={closeNotification}
+              >
+                <Text style={styles.customNotifButtonText}>ENTENDIDO</Text>
+              </TouchableOpacity>
+            </View>
+          </MotiView>
+        </Modal>
+        <ServerConfigModal
+          visible={showServerConfig}
+          onClose={() => setShowServerConfig(false)}
+          apiUrl={customApiUrl}
+          onSave={setCustomApiUrl}
+          isDarkMode={isDarkMode}
+        />
+        <ChangePasswordModal
+          visible={showChangePassword}
+          onClose={() => setShowChangePassword(false)}
+          onSave={handleUpdatePassword}
+          isDarkMode={isDarkMode}
+        />
       </GestureHandlerRootView>
     </SafeAreaProvider>
   );

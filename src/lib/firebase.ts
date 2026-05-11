@@ -1,4 +1,5 @@
 import { initializeApp, getApp, getApps } from 'firebase/app';
+import { getPerformance } from 'firebase/performance';
 import { Platform } from 'react-native';
 import {
     getFirestore,
@@ -29,6 +30,7 @@ import {
     GoogleAuthProvider,
     onAuthStateChanged,
     signOut,
+    signInWithEmailAndPassword,
     User as FirebaseUser
 } from 'firebase/auth';
 import * as FirebaseAuth from 'firebase/auth';
@@ -41,6 +43,9 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
 // Initialize Auth - simplest possible Web initialization
 export const auth = getAuth(app);
+
+// Initialize Firebase Performance Monitoring
+export const perf = typeof window !== 'undefined' ? getPerformance(app) : null;
 
 export const googleProvider = new GoogleAuthProvider();
 
@@ -90,6 +95,7 @@ export {
 // Export Auth functions
 export {
     signOut,
+    signInWithEmailAndPassword,
     onAuthStateChanged,
     signInWithPopup
 };
